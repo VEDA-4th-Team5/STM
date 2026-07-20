@@ -1,0 +1,17 @@
+# 빌드 산출물
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.cyclo
+*.list
+*.map
+
+# IDE 캐시
+.settings/
+
+# CMSIS-DSP 중 불필요한 것들
+STM1/Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
+STM1/Drivers/CMSIS/DSP/Examples/
+STM1/Drivers/CMSIS/DSP/Projects/
