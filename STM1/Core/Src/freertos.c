@@ -78,7 +78,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t TaskFlameSensorHandle;
 const osThreadAttr_t TaskFlameSensor_attributes = {
   .name = "TaskFlameSensor",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4, /* FFT buffers alone use ~700B of stack (see .su); 256*4 left almost no margin */
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for TaskHallSensor */
@@ -350,6 +350,11 @@ void StartTaskPacketTX(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  (void)pcTaskName;
+  Error_Handler();
+}
 /* USER CODE END Application */
 
