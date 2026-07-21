@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include "arm_math.h"
 #include <stdlib.h>
+#include "sensor_queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,43 +71,12 @@ int __io_putchar(int ch)
     return ch;
 }
 
-#define FFT_SIZE 64
-
-#include <stdlib.h>
-
-void fft_test(void)
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    arm_rfft_fast_instance_f32 fft_inst;
-    float32_t input_buf[FFT_SIZE];
-    float32_t output_buf[FFT_SIZE];
-    float32_t mag_buf[FFT_SIZE / 2];
-
-    arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
-
-    float sample_rate = 64.0f; // 64Hz ?ƒ˜?”Œë§?
-
-    for (int i = 0; i < FFT_SIZE; i++)
-    {
-        float t = (float)i / sample_rate;
-
-        // 1~20Hz ???—­?— ê±¸ì³ ?—¬?Ÿ¬ ?„±ë¶? ?„žê¸? (ë¶ˆê½ƒ ê¹œë¹¡?ž„ ?‰?‚´)
-        float signal = 0.5f * arm_sin_f32(2.0f * PI * 3.0f * t)    // 3Hz ?„±ë¶?
-                     + 0.3f * arm_sin_f32(2.0f * PI * 8.0f * t)    // 8Hz ?„±ë¶?
-                     + 0.2f * arm_sin_f32(2.0f * PI * 15.0f * t);  // 15Hz ?„±ë¶?
-
-        // ?•½ê°„ì˜ ?žœ?¤ ?…¸?´ì¦? ì¶”ê?
-        float noise = ((float)(rand() % 100) / 100.0f - 0.5f) * 0.1f;
-
-        input_buf[i] = signal + noise;
-    }
-
-    arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
-    arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
-
-    for (int i = 0; i < FFT_SIZE / 2; i++)
-    {
-        printf("bin %d (%.1f Hz): %.4f\r\n", i, (float)i * sample_rate / FFT_SIZE, mag_buf[i]);
-    }
+  if (hadc->Instance == ADC1)
+  {
+    osSemaphoreRelease(adcBufReadySemHandle);
+  }
 }
 /* USER CODE END 0 */
 
@@ -143,14 +113,17 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
-  fft_test();
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
+
+  /* USER CODE BEGIN RTOS_PERIPH_START */
+  /* adcBufReadySemHandle must exist before conversions can start firing the callback */
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
+  /* USER CODE END RTOS_PERIPH_START */
 
   /* Start scheduler */
   osKernelStart();

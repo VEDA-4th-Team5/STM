@@ -179,10 +179,45 @@ void StartDefaultTask(void *argument)
 void StartTaskFlameSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskFlameSensor */
-  /* Infinite loop */
-  for(;;)
+  #define FFT_SIZE 64
+  /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
+     This local verdict just lets us see something meaningful over UART before that. */
+  #define FLAME_ENERGY_THRESHOLD 5.0f
+
+  arm_rfft_fast_instance_f32 fft_inst;
+  float32_t input_buf[FFT_SIZE];
+  float32_t output_buf[FFT_SIZE];
+  float32_t mag_buf[FFT_SIZE / 2];
+
+  arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
+
+  for (;;)
   {
-    osDelay(1);
+    osSemaphoreAcquire(adcBufReadySemHandle, osWaitForever);
+
+    for (int i = 0; i < FFT_SIZE; i++)
+    {
+      input_buf[i] = ((float32_t)adc_buf[i] - 2048.0f) / 2048.0f;
+    }
+
+    arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
+    arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
+
+    float32_t energy = 0.0f;
+    for (int bin = 1; bin <= 20; bin++)
+    {
+      energy += mag_buf[bin];
+    }
+
+    uint8_t verdict = (energy >= FLAME_ENERGY_THRESHOLD) ? 1 : 0;
+
+    SensorEvent_t evt = {
+      .type = EVT_FLAME,
+      .slot = 0,
+      .state = verdict,
+      .energy = energy
+    };
+    osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
   }
   /* USER CODE END StartTaskFlameSensor */
 }
