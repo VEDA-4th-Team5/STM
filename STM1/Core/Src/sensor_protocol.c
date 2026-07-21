@@ -1,8 +1,13 @@
+/* Formats sensor events as the plain-text lines the Raspberry Pi's parser
+ * already expects (see docs/STM1_pipeline_test_2026-07-21.md). No CRC/binary
+ * framing here on purpose - nothing on the receiving end consumes it. */
 #include "sensor_protocol.h"
 #include "usart.h"
 #include <stdio.h>
 #include <string.h>
 
+/* Each stream has its own counter so the Pi can detect dropped/out-of-order
+ * packets; hall_sequence is shared across all 4 slots, not per-slot. */
 static uint32_t hall_sequence = 0;
 static uint32_t flame_sequence = 0;
 

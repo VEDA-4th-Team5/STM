@@ -71,6 +71,9 @@ int __io_putchar(int ch)
     return ch;
 }
 
+/* Fires (from ISR context) every time the circular DMA buffer wraps, i.e.
+ * once per full 1-second/64-sample window. Just signals TaskFlameSensor -
+ * no heavy work here since we're in an interrupt handler. */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC1)
@@ -157,6 +160,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
+  /* BYPASS not Crystal: on this Nucleo board HSE comes from the ST-Link's
+   * 8MHz MCO into PH0, there's no resonator on OSC_IN/OSC_OUT.
+   * PLLM=8 -> 8MHz/8=1MHz VCO input, same as before; PLLN/PLLP unchanged so
+   * SYSCLK is still 84MHz and TIM2's 64Hz math doesn't need to change. */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;

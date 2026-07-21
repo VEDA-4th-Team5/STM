@@ -51,11 +51,17 @@
 extern volatile uint32_t tim2_tick_count;
 extern uint16_t adc_buf[64];
 
+/* Shared mailbox: TaskHallSensor/TaskFlameSensor push SensorEvent_t here,
+ * TaskPacketTX pops and sends them over UART. One queue instead of a
+ * mutex-protected struct so producers/consumer stay naturally serialized. */
 osMessageQueueId_t sensorEventQueueHandle;
 const osMessageQueueAttr_t sensorEventQueue_attributes = {
   .name = "sensorEventQueue"
 };
 
+/* Released by HAL_ADC_ConvCpltCallback (main.c) each time the circular DMA
+ * buffer finishes one full 1-second window, so TaskFlameSensor knows when
+ * adc_buf is safe to read without racing the next DMA write. */
 osSemaphoreId_t adcBufReadySemHandle;
 const osSemaphoreAttr_t adcBufReadySem_attributes = {
   .name = "adcBufReadySem"
@@ -127,6 +133,10 @@ void MX_FREERTOS_Init(void) {
   sensorEventQueueHandle = osMessageQueueNew(8, sizeof(SensorEvent_t), &sensorEventQueue_attributes);
   /* USER CODE END RTOS_QUEUES */
 
+  /* NOTE: CubeMX 2.2.0 has a recurring bug where regenerating FreeRTOS code
+   * wipes the 4 osThreadNew(...) calls below and replaces them with an empty
+   * header comment block. If you regenerate from the .ioc, check this
+   * function and restore these lines if they're missing. */
   /* Create the thread(s) */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
   TaskFlameSensorHandle = osThreadNew(StartTaskFlameSensor, NULL, &TaskFlameSensor_attributes);
@@ -179,6 +189,8 @@ void StartDefaultTask(void *argument)
 void StartTaskFlameSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskFlameSensor */
+  /* 64 samples @ 64Hz = 1 second window -> 1Hz per FFT bin, matching the
+   * 1~20Hz flame-flicker band we care about. */
   #define FFT_SIZE 64
   /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
      This local verdict just lets us see something meaningful over UART before that. */
@@ -193,8 +205,11 @@ void StartTaskFlameSensor(void *argument)
 
   for (;;)
   {
+    /* Blocks here until main.c's ADC callback signals one full window is ready. */
     osSemaphoreAcquire(adcBufReadySemHandle, osWaitForever);
 
+    /* adc_buf is 12-bit unsigned (0~4095); recenter around the 2048 midpoint
+     * and scale to roughly -1..1 for the FFT. */
     for (int i = 0; i < FFT_SIZE; i++)
     {
       input_buf[i] = ((float32_t)adc_buf[i] - 2048.0f) / 2048.0f;
@@ -203,6 +218,8 @@ void StartTaskFlameSensor(void *argument)
     arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
     arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
 
+    /* Sum magnitude across bins 1~20 (i.e. 1~20Hz) into one "energy" number
+     * instead of sending all 20 bins over the wire. */
     float32_t energy = 0.0f;
     for (int bin = 1; bin <= 20; bin++)
     {
@@ -235,13 +252,18 @@ void StartTaskHallSensor(void *argument)
   const uint32_t POLL_PERIOD_MS = 50;
   const uint32_t DEBOUNCE_COUNT = 5; /* 5 * 50ms = 250ms stable required */
 
-  uint8_t debounced_state[4] = {0};
-  uint8_t candidate_state[4] = {0};
-  uint32_t stable_count[4] = {0};
-  uint8_t baseline_set[4] = {0};
+  /* Per-channel (0~3) tracking, since one physical wire (MUX_COM) carries
+   * all 4 sensors one at a time depending on what MUX_A/MUX_B select. */
+  uint8_t debounced_state[4] = {0};   /* last confirmed state, sent to Pi */
+  uint8_t candidate_state[4] = {0};   /* raw reading being debounced */
+  uint32_t stable_count[4] = {0};     /* consecutive reads matching candidate_state */
+  uint8_t baseline_set[4] = {0};      /* becomes 1 once each channel has an initial value */
 
   for (;;)
   {
+    /* Round-robin through the 4 CD4051 channels: pick a channel via
+     * MUX_A/MUX_B, wait for the analog switch to settle, then read it back
+     * on the shared MUX_COM line. */
     for (uint8_t ch = 0; ch < 4; ch++)
     {
       HAL_GPIO_WritePin(MUX_A_GPIO_Port, MUX_A_Pin, (ch & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -250,6 +272,8 @@ void StartTaskHallSensor(void *argument)
 
       uint8_t raw = (HAL_GPIO_ReadPin(MUX_COM_GPIO_Port, MUX_COM_Pin) == GPIO_PIN_SET) ? 1 : 0;
 
+      /* Debounce: only trust a new value once it's been read the same way
+       * DEBOUNCE_COUNT times in a row; any different reading resets the count. */
       if (raw == candidate_state[ch])
       {
         if (stable_count[ch] < DEBOUNCE_COUNT)
@@ -273,6 +297,7 @@ void StartTaskHallSensor(void *argument)
         }
         else if (candidate_state[ch] != debounced_state[ch])
         {
+          /* Real state change confirmed -> only now do we notify TaskPacketTX. */
           debounced_state[ch] = candidate_state[ch];
 
           SensorEvent_t evt = {
@@ -301,6 +326,8 @@ void StartTaskHallSensor(void *argument)
 void StartTaskPacketTX(void *argument)
 {
   /* USER CODE BEGIN StartTaskPacketTX */
+  /* Sole consumer of sensorEventQueue: turns whatever TaskHallSensor/
+   * TaskFlameSensor produced into a UART line and sends it. */
   SensorEvent_t evt;
 
   for (;;)
