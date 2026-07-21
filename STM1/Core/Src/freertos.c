@@ -26,6 +26,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "arm_math.h"
+#include "sensor_queue.h"
+#include "sensor_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,6 +50,16 @@
 /* USER CODE BEGIN Variables */
 extern volatile uint32_t tim2_tick_count;
 extern uint16_t adc_buf[64];
+
+osMessageQueueId_t sensorEventQueueHandle;
+const osMessageQueueAttr_t sensorEventQueue_attributes = {
+  .name = "sensorEventQueue"
+};
+
+osSemaphoreId_t adcBufReadySemHandle;
+const osSemaphoreAttr_t adcBufReadySem_attributes = {
+  .name = "adcBufReadySem"
+};
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -98,32 +111,35 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * File Name          : freertos.c
-  * Description        : Code for freertos applications
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
-/* USER CODE END Header */
+  /* USER CODE BEGIN RTOS_MUTEX */
 
-/**
-  * @}
-  */
+  /* USER CODE END RTOS_MUTEX */
 
-/**
-  * @}
-  */
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  adcBufReadySemHandle = osSemaphoreNew(1, 0, &adcBufReadySem_attributes);
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  sensorEventQueueHandle = osMessageQueueNew(8, sizeof(SensorEvent_t), &sensorEventQueue_attributes);
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  TaskFlameSensorHandle = osThreadNew(StartTaskFlameSensor, NULL, &TaskFlameSensor_attributes);
+  TaskHallSensorHandle = osThreadNew(StartTaskHallSensor, NULL, &TaskHallSensor_attributes);
+  TaskPacketTXHandle = osThreadNew(StartTaskPacketTX, NULL, &TaskPacketTX_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+
+  /* USER CODE END RTOS_EVENTS */
 }
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -144,7 +160,7 @@ void StartDefaultTask(void *argument)
       osDelay(1000);
 
 //      printf("ADC buf[0..7]: ");
-//      for (int i = 0; i < 8; i++) // putty ?™•?¸?š© ì¶œë ¥ ì½”ë“œ
+//      for (int i = 0; i < 8; i++) // putty ?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½ ì¶œë ¥ ì½”ë“œ
 //      {
 //          printf("%u ", adc_buf[i]);
 //      }
@@ -181,10 +197,61 @@ void StartTaskFlameSensor(void *argument)
 void StartTaskHallSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskHallSensor */
-  /* Infinite loop */
-  for(;;)
+  const uint32_t POLL_PERIOD_MS = 50;
+  const uint32_t DEBOUNCE_COUNT = 5; /* 5 * 50ms = 250ms stable required */
+
+  uint8_t debounced_state[4] = {0};
+  uint8_t candidate_state[4] = {0};
+  uint32_t stable_count[4] = {0};
+  uint8_t baseline_set[4] = {0};
+
+  for (;;)
   {
-    osDelay(1);
+    for (uint8_t ch = 0; ch < 4; ch++)
+    {
+      HAL_GPIO_WritePin(MUX_A_GPIO_Port, MUX_A_Pin, (ch & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(MUX_B_GPIO_Port, MUX_B_Pin, (ch & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      osDelay(1); /* mux settle time */
+
+      uint8_t raw = (HAL_GPIO_ReadPin(MUX_COM_GPIO_Port, MUX_COM_Pin) == GPIO_PIN_SET) ? 1 : 0;
+
+      if (raw == candidate_state[ch])
+      {
+        if (stable_count[ch] < DEBOUNCE_COUNT)
+        {
+          stable_count[ch]++;
+        }
+      }
+      else
+      {
+        candidate_state[ch] = raw;
+        stable_count[ch] = 1;
+      }
+
+      if (stable_count[ch] >= DEBOUNCE_COUNT)
+      {
+        if (!baseline_set[ch])
+        {
+          /* first stable read after boot: record baseline, do not emit an event */
+          debounced_state[ch] = candidate_state[ch];
+          baseline_set[ch] = 1;
+        }
+        else if (candidate_state[ch] != debounced_state[ch])
+        {
+          debounced_state[ch] = candidate_state[ch];
+
+          SensorEvent_t evt = {
+            .type = EVT_HALL,
+            .slot = ch,
+            .state = debounced_state[ch],
+            .energy = 0.0f
+          };
+          osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+        }
+      }
+    }
+
+    osDelay(POLL_PERIOD_MS);
   }
   /* USER CODE END StartTaskHallSensor */
 }
