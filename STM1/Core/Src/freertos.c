@@ -301,10 +301,22 @@ void StartTaskHallSensor(void *argument)
 void StartTaskPacketTX(void *argument)
 {
   /* USER CODE BEGIN StartTaskPacketTX */
-  /* Infinite loop */
-  for(;;)
+  SensorEvent_t evt;
+
+  for (;;)
   {
-    osDelay(1);
+    if (osMessageQueueGet(sensorEventQueueHandle, &evt, NULL, osWaitForever) == osOK)
+    {
+      switch (evt.type)
+      {
+        case EVT_HALL:
+          SensorProtocol_SendHallStatus(evt.slot, evt.state);
+          break;
+        case EVT_FLAME:
+          SensorProtocol_SendFlameStatus(evt.state, evt.energy);
+          break;
+      }
+    }
   }
   /* USER CODE END StartTaskPacketTX */
 }
