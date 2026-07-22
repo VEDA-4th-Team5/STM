@@ -47,7 +47,21 @@ DMA_HandleTypeDef hdma_spi3_rx;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+/* Per-channel samples in one FFT window. Swap this to 512/1024 for the
+ * cycle-count benchmark later; everything else scales off it. */
+#define WINDOW_SAMPLES 256
+/* Each I2S peripheral delivers interleaved stereo (L,R,L,R,...), and the
+ * DMA buffer holds two halves (half/full complete = ping-pong) so one half
+ * can be processed while the other keeps filling. */
+#define I2S_BUF_LEN (WINDOW_SAMPLES * 2 * 2)
 
+int16_t i2s2_buf[I2S_BUF_LEN];
+int16_t i2s3_buf[I2S_BUF_LEN];
+
+volatile uint8_t i2s2_half_ready = 0;
+volatile uint8_t i2s2_full_ready = 0;
+volatile uint8_t i2s3_half_ready = 0;
+volatile uint8_t i2s3_full_ready = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,7 +78,34 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* I2S3 is the slave: it only ever gets a bit clock if I2S2's CK/WS pins are
+ * physically jumpered to I2S3's CK/WS pins (PB10->PC10, PB12->PA4). Without
+ * that wire, I2S3's DMA sits idle forever and i2s3_*_ready never becomes
+ * true - that's expected on a bare board with no jumpers/mics attached yet. */
 
+void HAL_I2S_RxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+  if (hi2s->Instance == SPI2)
+  {
+    i2s2_half_ready = 1;
+  }
+  else if (hi2s->Instance == SPI3)
+  {
+    i2s3_half_ready = 1;
+  }
+}
+
+void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+  if (hi2s->Instance == SPI2)
+  {
+    i2s2_full_ready = 1;
+  }
+  else if (hi2s->Instance == SPI3)
+  {
+    i2s3_full_ready = 1;
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -103,13 +144,34 @@ int main(void)
   MX_I2S3_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  /* Start the slave (I2S3) first so it's already listening before the
+   * master (I2S2) begins driving the shared clock line. */
+  HAL_I2S_Receive_DMA(&hi2s3, (uint16_t *)i2s3_buf, I2S_BUF_LEN);
+  HAL_I2S_Receive_DMA(&hi2s2, (uint16_t *)i2s2_buf, I2S_BUF_LEN);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* A "pair" (same half, both mics) should land together since I2S3
+     * is clock-synced off I2S2 - but each callback fires independently,
+     * so wait for both flags before treating the window as ready. */
+    if (i2s2_half_ready && i2s3_half_ready)
+    {
+      i2s2_half_ready = 0;
+      i2s3_half_ready = 0;
+      /* TODO: GCC-PHAT on i2s2_buf[0 .. I2S_BUF_LEN/2-1], i2s3_buf[same range] */
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    }
+
+    if (i2s2_full_ready && i2s3_full_ready)
+    {
+      i2s2_full_ready = 0;
+      i2s3_full_ready = 0;
+      /* TODO: GCC-PHAT on i2s2_buf[I2S_BUF_LEN/2 .. I2S_BUF_LEN-1], i2s3_buf[same range] */
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
