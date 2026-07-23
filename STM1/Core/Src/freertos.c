@@ -195,11 +195,21 @@ void StartTaskFlameSensor(void *argument)
   /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
      This local verdict just lets us see something meaningful over UART before that. */
   #define FLAME_ENERGY_THRESHOLD 5.0f
+  /* Raw single-window energy is noisy (hand jitter/distance changes land in
+   * the same 1~20Hz band as real flicker), so the reported verdict only
+   * flips after this many consecutive 1-second windows agree -- same idea
+   * as TaskHallSensor's debounce, applied to ALERT/CLEAR instead of a GPIO
+   * read. The raw energy value is still sent every window regardless. */
+  #define FLAME_DEBOUNCE_COUNT 3
 
   arm_rfft_fast_instance_f32 fft_inst;
   float32_t input_buf[FFT_SIZE];
   float32_t output_buf[FFT_SIZE];
   float32_t mag_buf[FFT_SIZE / 2];
+
+  uint8_t debounced_verdict = 0; /* last confirmed verdict, sent to Pi */
+  uint8_t candidate_verdict = 0; /* raw per-window verdict being debounced */
+  uint32_t stable_count = 0;     /* consecutive windows matching candidate_verdict */
 
   arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
 
@@ -226,12 +236,34 @@ void StartTaskFlameSensor(void *argument)
       energy += mag_buf[bin];
     }
 
-    uint8_t verdict = (energy >= FLAME_ENERGY_THRESHOLD) ? 1 : 0;
+    uint8_t raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD) ? 1 : 0;
 
+    /* Debounce: only trust a new verdict once it's shown up FLAME_DEBOUNCE_COUNT
+     * windows in a row; any window that disagrees resets the count. */
+    if (raw_verdict == candidate_verdict)
+    {
+      if (stable_count < FLAME_DEBOUNCE_COUNT)
+      {
+        stable_count++;
+      }
+    }
+    else
+    {
+      candidate_verdict = raw_verdict;
+      stable_count = 1;
+    }
+
+    if (stable_count >= FLAME_DEBOUNCE_COUNT)
+    {
+      debounced_verdict = candidate_verdict;
+    }
+
+    /* Energy is reported every window (for live calibration/telemetry);
+     * only the state field is debounced. */
     SensorEvent_t evt = {
       .type = EVT_FLAME,
       .slot = 0,
-      .state = verdict,
+      .state = debounced_verdict,
       .energy = energy
     };
     osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
