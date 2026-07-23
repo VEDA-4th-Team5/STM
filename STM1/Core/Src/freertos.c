@@ -189,54 +189,49 @@ void StartDefaultTask(void *argument)
 void StartTaskFlameSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskFlameSensor */
-  /* 64 samples @ 64Hz = 1 second window -> 1Hz per FFT bin, matching the
-   * 1~20Hz flame-flicker band we care about. */
-  #define FFT_SIZE 64
-  /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
-     This local verdict just lets us see something meaningful over UART before that. */
-  #define FLAME_ENERGY_THRESHOLD 5.0f
-  /* Raw single-window energy is noisy (hand jitter/distance changes land in
-   * the same 1~20Hz band as real flicker), so the reported verdict only
-   * flips after this many consecutive 1-second windows agree -- same idea
-   * as TaskHallSensor's debounce, applied to ALERT/CLEAR instead of a GPIO
-   * read. The raw energy value is still sent every window regardless. */
+  /* DFR0076's own vendor example is just analogRead() + print -- it's a
+   * raw IR-intensity sensor, not an oscillation/flicker sensor. Our earlier
+   * FFT-based 1~20Hz flicker-energy approach picked up hand jitter/distance
+   * noise as readily as real flame and gave an inconsistent threshold.
+   * Switched to comparing the raw ADC average against a baseline captured
+   * at boot, same debounce pattern as TaskHallSensor. */
+  #define ADC_WINDOW_SIZE 64 /* still the DMA window size main.c fills before signaling us */
+  /* TODO: placeholder -- retune from real raw_avg logs (baseline vs. flame). */
+  #define FLAME_DELTA_THRESHOLD 40.0f
   #define FLAME_DEBOUNCE_COUNT 3
-
-  arm_rfft_fast_instance_f32 fft_inst;
-  float32_t input_buf[FFT_SIZE];
-  float32_t output_buf[FFT_SIZE];
-  float32_t mag_buf[FFT_SIZE / 2];
 
   uint8_t debounced_verdict = 0; /* last confirmed verdict, sent to Pi */
   uint8_t candidate_verdict = 0; /* raw per-window verdict being debounced */
   uint32_t stable_count = 0;     /* consecutive windows matching candidate_verdict */
-
-  arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
+  uint8_t baseline_set = 0;
+  float32_t baseline_avg = 0.0f; /* first window's raw average, ambient reference */
 
   for (;;)
   {
     /* Blocks here until main.c's ADC callback signals one full window is ready. */
     osSemaphoreAcquire(adcBufReadySemHandle, osWaitForever);
 
-    /* adc_buf is 12-bit unsigned (0~4095); recenter around the 2048 midpoint
-     * and scale to roughly -1..1 for the FFT. */
-    for (int i = 0; i < FFT_SIZE; i++)
+    uint32_t adc_sum = 0;
+    for (int i = 0; i < ADC_WINDOW_SIZE; i++)
     {
-      input_buf[i] = ((float32_t)adc_buf[i] - 2048.0f) / 2048.0f;
+      adc_sum += adc_buf[i];
+    }
+    float32_t raw_avg = (float32_t)adc_sum / ADC_WINDOW_SIZE;
+
+    if (!baseline_set)
+    {
+      /* first window after boot: record ambient reference, don't judge yet */
+      baseline_avg = raw_avg;
+      baseline_set = 1;
     }
 
-    arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
-    arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
-
-    /* Sum magnitude across bins 1~20 (i.e. 1~20Hz) into one "energy" number
-     * instead of sending all 20 bins over the wire. */
-    float32_t energy = 0.0f;
-    for (int bin = 1; bin <= 20; bin++)
+    float32_t delta = raw_avg - baseline_avg;
+    if (delta < 0.0f)
     {
-      energy += mag_buf[bin];
+      delta = -delta;
     }
 
-    uint8_t raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD) ? 1 : 0;
+    uint8_t raw_verdict = (delta >= FLAME_DELTA_THRESHOLD) ? 1 : 0;
 
     /* Debounce: only trust a new verdict once it's shown up FLAME_DEBOUNCE_COUNT
      * windows in a row; any window that disagrees resets the count. */
@@ -258,13 +253,13 @@ void StartTaskFlameSensor(void *argument)
       debounced_verdict = candidate_verdict;
     }
 
-    /* Energy is reported every window (for live calibration/telemetry);
+    /* raw_avg is reported every window (for live calibration/telemetry);
      * only the state field is debounced. */
     SensorEvent_t evt = {
       .type = EVT_FLAME,
       .slot = 0,
       .state = debounced_verdict,
-      .energy = energy
+      .energy = raw_avg
     };
     osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
   }
