@@ -20,12 +20,22 @@ Raspberry Pi에 전달한다.
 
 ## 신호 처리
 
-- TIM2가 64Hz(PSC=1249, ARR=1049)로 ADC1을 TRGO 트리거, circular DMA로 `adc_buf[64]`에 저장
+- TIM2가 64Hz(PSC=1249, ARR=1049)로 ADC1(PC0, `ADC_SAMPLETIME_480CYCLES`)을 TRGO
+  트리거, circular DMA로 `adc_buf[64]`에 저장
 - 1초(64샘플) 단위로 `HAL_ADC_ConvCpltCallback`이 `adcBufReadySem` 세마포어를 release
-- 64포인트 FFT(CMSIS-DSP `arm_rfft_fast_f32`), 1~20Hz(bin 1~20) magnitude 합산을
-  "에너지값"으로 사용. 화재 판정 임계값은 STM32가 확정하지 않고 Raspberry Pi로
-  넘겨서(재플래싱 없이 튜닝 가능하도록) 결정한다 — 코드의 임계값(5.0)은 로컬
-  placeholder일 뿐.
+- 같은 64샘플 윈도우에서 두 가지 신호를 뽑아 **OR로 결합**하는 하이브리드 판정
+  (실물 DFR0076 + 라이터로 실측 검증, 2026-07-23):
+  - **FFT flicker 에너지**(`energy`, 1~20Hz bin 합산): 점화/움직임 순간처럼 급격한
+    변화에 강하게 반응하지만, 불꽃이 안정적으로 지속 연소하면 오히려 baseline
+    수준(심하면 0)까지 가라앉는다 — 카오틱한 실제 불꽃 특성상 "지속 연소"엔 약함
+  - **raw DC 레벨**(`raw_avg`, 부팅 시 baseline 대비 delta): 반응은 느리지만
+    지속적인 IR 세기를 안정적으로 반영 — "지속 연소" 확인에 강함
+  - `raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD=5.0) || (delta >= FLAME_DELTA_THRESHOLD=40.0)`
+  - 카오틱한 flicker로 인한 순간적 소강을 흡수하기 위해 K-of-N 다수결 디바운스
+    적용(최근 5윈도우 중 3개 이상 hit이면 ALERT 유지) — `TaskHallSensor`의 연속
+    디바운스와 달리 sliding window 방식
+  - UART로는 여전히 `energy`(FFT 값)만 실어보내 Pi 쪽에서 추가 튜닝 여지를 둔다
+  - 손 흔들기(빛 가림)/형광등/모니터 오탐 테스트 통과 확인. 태양광 테스트는 미실시
 
 ## FreeRTOS 태스크
 
@@ -59,13 +69,18 @@ CubeMX 2.2.0에서 FreeRTOS 코드를 재생성할 때마다 `freertos.c`의
 블록으로 대체되는 버그가 재현된다. **코드 재생성 직후 반드시 이 함수를 확인**하고,
 필요하면 4개 태스크의 `osThreadNew` 호출과 큐/세마포어 생성 코드를 복원할 것.
 
-## 현재 상태 (2026-07-21)
+## 현재 상태 (2026-07-23)
 
-홀센서/불꽃센서/LoRa 모듈 실물이 배송 지연으로 아직 없어서, STM1 보드만으로
-파이프라인 전체(ADC→FFT→에너지계산→판정→UART, 홀센서 디바운스→이벤트→UART)를
-검증했다. 상세 내용은 [`../docs/STM1_pipeline_test_2026-07-21.md`](../docs/STM1_pipeline_test_2026-07-21.md).
+실물 DFR0076 불꽃센서로 점화→지속연소→소화 전체 사이클과 오탐(손 흔들기/형광등/
+모니터) 테스트를 마쳤고, 하이브리드 판정 알고리즘(위 "신호 처리" 참고)까지 확정했다.
+초기 파이프라인 스모크 테스트(센서 미장착 상태, 손가락 접촉으로 ADC 반응만 확인)
+기록은 [`../docs/STM1_pipeline_test_2026-07-21.md`](../docs/STM1_pipeline_test_2026-07-21.md)에
+남아있으나 이후 실물 센서 테스트로 대체됨.
+
+LoRa(SX1262)는 현재 STM1 통신 경로에 포함되어 있지 않다 — Raspberry Pi가 소비하는
+파서가 UART 문자열 포맷이라 UART만으로 확정. 필요해지면 별도로 추가.
 
 남은 것:
-- 실제 불꽃센서(DFR0076) 도착 후 태양광/형광등/라이터 3종 실측 → Pi 쪽 임계값 초기값 산정
+- 태양광 환경에서 불꽃센서 오탐 테스트
 - 실제 CD4051 + 홀센서 4개 장착 후 채널별 독립 동작 재확인
 - Raspberry Pi 파서와 실제 연동 테스트

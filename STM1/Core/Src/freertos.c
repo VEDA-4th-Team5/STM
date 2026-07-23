@@ -165,16 +165,7 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-//      printf("TIM2 tick count in 1 sec: %u\r\n", (unsigned int)tim2_tick_count);
-//      tim2_tick_count = 0;
-      osDelay(1000);
-
-//      printf("ADC buf[0..7]: ");
-//      for (int i = 0; i < 8; i++) // putty ?��?��?�� 출력 코드
-//      {
-//          printf("%u ", adc_buf[i]);
-//      }
-//      printf("\r\n");
+    osDelay(1000);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -192,16 +183,18 @@ void StartTaskFlameSensor(void *argument)
   /* 64 samples @ 64Hz = 1 second window -> 1Hz per FFT bin, matching the
    * 1~20Hz flame-flicker band we care about. */
   #define FFT_SIZE 64
-  /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
-     This local verdict just lets us see something meaningful over UART before that. */
+  /* STM32 doesn't own the final fire-alarm decision -- the Pi does -- but
+   * this local verdict still needs to be a meaningful ALERT/CLEAR over
+   * UART, not just raw telemetry. Both thresholds below are tuned against
+   * real DFR0076 hardware: ignition/hand-movement/fluorescent-light/monitor
+   * tests on 2026-07-23 (see docs/), not arbitrary placeholders. */
   #define FLAME_ENERGY_THRESHOLD 5.0f
   /* FFT flicker energy spikes hard at ignition/movement but settles back
    * toward baseline once a flame burns steady -- great "something just
    * changed" trigger, bad "still burning" confirmation. Raw DC level is the
    * opposite: doesn't react fast, but tracks continuous IR intensity while
    * a flame stays present. Combine them with OR: either one being true
-   * counts as a hit for a given window. TODO: retune from real raw_avg
-   * delta logs (placeholder). */
+   * counts as a hit for a given window. */
   #define FLAME_DELTA_THRESHOLD 40.0f
   /* Real flame flicker is chaotic, not a clean steady oscillation -- a small
    * lighter flame can have individual 1-second windows that happen to land

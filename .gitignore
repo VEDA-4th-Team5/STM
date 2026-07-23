@@ -10,6 +10,7 @@ Release/
 
 # IDE 캐시
 .settings/
+.cubeide_ws_build/
 
 # CMSIS-DSP 중 불필요한 것들
 STM1/Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
