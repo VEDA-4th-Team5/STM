@@ -189,34 +189,58 @@ void StartDefaultTask(void *argument)
 void StartTaskFlameSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskFlameSensor */
-  /* DFR0076's own vendor example is just analogRead() + print -- it's a
-   * raw IR-intensity sensor, not an oscillation/flicker sensor. Our earlier
-   * FFT-based 1~20Hz flicker-energy approach picked up hand jitter/distance
-   * noise as readily as real flame and gave an inconsistent threshold.
-   * Switched to comparing the raw ADC average against a baseline captured
-   * at boot, same debounce pattern as TaskHallSensor. */
-  #define ADC_WINDOW_SIZE 64 /* still the DMA window size main.c fills before signaling us */
-  /* TODO: placeholder -- retune from real raw_avg logs (baseline vs. flame). */
+  /* 64 samples @ 64Hz = 1 second window -> 1Hz per FFT bin, matching the
+   * 1~20Hz flame-flicker band we care about. */
+  #define FFT_SIZE 64
+  /* Placeholder only: STM32 does not decide the real fire threshold, the Pi does.
+     This local verdict just lets us see something meaningful over UART before that. */
+  #define FLAME_ENERGY_THRESHOLD 5.0f
+  /* FFT flicker energy spikes hard at ignition/movement but settles back
+   * toward baseline once a flame burns steady -- great "something just
+   * changed" trigger, bad "still burning" confirmation. Raw DC level is the
+   * opposite: doesn't react fast, but tracks continuous IR intensity while
+   * a flame stays present. Combine them with OR: either one being true
+   * counts as a hit for a given window. TODO: retune from real raw_avg
+   * delta logs (placeholder). */
   #define FLAME_DELTA_THRESHOLD 40.0f
-  #define FLAME_DEBOUNCE_COUNT 3
+  /* Real flame flicker is chaotic, not a clean steady oscillation -- a small
+   * lighter flame can have individual 1-second windows that happen to land
+   * calm and read near baseline even while genuinely burning. A strict
+   * "N consecutive windows" debounce keeps getting reset by those calm
+   * windows and flaps ALERT/CLEAR. A sliding K-of-N majority vote tolerates
+   * a few low windows mixed in without losing the detection. */
+  #define FLAME_VOTE_WINDOW 5    /* look at the last 5 one-second windows */
+  #define FLAME_VOTE_THRESHOLD 3 /* ...and require at least 3 of them over threshold */
 
-  uint8_t debounced_verdict = 0; /* last confirmed verdict, sent to Pi */
-  uint8_t candidate_verdict = 0; /* raw per-window verdict being debounced */
-  uint32_t stable_count = 0;     /* consecutive windows matching candidate_verdict */
+  arm_rfft_fast_instance_f32 fft_inst;
+  float32_t input_buf[FFT_SIZE];
+  float32_t output_buf[FFT_SIZE];
+  float32_t mag_buf[FFT_SIZE / 2];
+
+  uint8_t vote_history[FLAME_VOTE_WINDOW] = {0}; /* raw_verdict of the last N windows */
+  uint8_t vote_index = 0;
+  uint8_t vote_count = 0; /* running count of 1s currently in vote_history */
+
   uint8_t baseline_set = 0;
   float32_t baseline_avg = 0.0f; /* first window's raw average, ambient reference */
+
+  arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
 
   for (;;)
   {
     /* Blocks here until main.c's ADC callback signals one full window is ready. */
     osSemaphoreAcquire(adcBufReadySemHandle, osWaitForever);
 
+    /* adc_buf is 12-bit unsigned (0~4095); recenter around the 2048 midpoint
+     * and scale to roughly -1..1 for the FFT. Also accumulate the raw sum
+     * for the DC-level check below (same samples, no extra ADC work). */
     uint32_t adc_sum = 0;
-    for (int i = 0; i < ADC_WINDOW_SIZE; i++)
+    for (int i = 0; i < FFT_SIZE; i++)
     {
       adc_sum += adc_buf[i];
+      input_buf[i] = ((float32_t)adc_buf[i] - 2048.0f) / 2048.0f;
     }
-    float32_t raw_avg = (float32_t)adc_sum / ADC_WINDOW_SIZE;
+    float32_t raw_avg = (float32_t)adc_sum / FFT_SIZE;
 
     if (!baseline_set)
     {
@@ -231,35 +255,36 @@ void StartTaskFlameSensor(void *argument)
       delta = -delta;
     }
 
-    uint8_t raw_verdict = (delta >= FLAME_DELTA_THRESHOLD) ? 1 : 0;
+    arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
+    arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
 
-    /* Debounce: only trust a new verdict once it's shown up FLAME_DEBOUNCE_COUNT
-     * windows in a row; any window that disagrees resets the count. */
-    if (raw_verdict == candidate_verdict)
+    /* Sum magnitude across bins 1~20 (i.e. 1~20Hz) into one "energy" number
+     * instead of sending all 20 bins over the wire. */
+    float32_t energy = 0.0f;
+    for (int bin = 1; bin <= 20; bin++)
     {
-      if (stable_count < FLAME_DEBOUNCE_COUNT)
-      {
-        stable_count++;
-      }
-    }
-    else
-    {
-      candidate_verdict = raw_verdict;
-      stable_count = 1;
+      energy += mag_buf[bin];
     }
 
-    if (stable_count >= FLAME_DEBOUNCE_COUNT)
-    {
-      debounced_verdict = candidate_verdict;
-    }
+    /* Hybrid trigger: flicker spike (ignition/movement) OR sustained DC
+     * level shift (steady burn) either one counts as a hit this window. */
+    uint8_t raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD || delta >= FLAME_DELTA_THRESHOLD) ? 1 : 0;
 
-    /* raw_avg is reported every window (for live calibration/telemetry);
+    /* Slide the vote window: drop the oldest window's vote, add this one's. */
+    vote_count -= vote_history[vote_index];
+    vote_history[vote_index] = raw_verdict;
+    vote_count += raw_verdict;
+    vote_index = (vote_index + 1) % FLAME_VOTE_WINDOW;
+
+    uint8_t debounced_verdict = (vote_count >= FLAME_VOTE_THRESHOLD) ? 1 : 0;
+
+    /* Energy is reported every window (for live calibration/telemetry);
      * only the state field is debounced. */
     SensorEvent_t evt = {
       .type = EVT_FLAME,
       .slot = 0,
       .state = debounced_verdict,
-      .energy = raw_avg
+      .energy = energy
     };
     osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
   }
