@@ -375,6 +375,10 @@ void StartTaskPacketTX(void *argument)
    * TaskFlameSensor produced into a UART line and sends it. */
   SensorEvent_t evt;
 
+#if SENSOR_DEBUG_UI
+  SensorDashboard_Init();
+#endif
+
   for (;;)
   {
     if (osMessageQueueGet(sensorEventQueueHandle, &evt, NULL, osWaitForever) == osOK)
@@ -382,10 +386,18 @@ void StartTaskPacketTX(void *argument)
       switch (evt.type)
       {
         case EVT_HALL:
+#if SENSOR_DEBUG_UI
+          SensorDashboard_UpdateHall(evt.slot, evt.state);
+#else
           SensorProtocol_SendHallStatus(evt.slot, evt.state);
+#endif
           break;
         case EVT_FLAME:
+#if SENSOR_DEBUG_UI
+          SensorDashboard_UpdateFlame(evt.state, evt.energy);
+#else
           SensorProtocol_SendFlameStatus(evt.state, evt.energy);
+#endif
           break;
       }
     }

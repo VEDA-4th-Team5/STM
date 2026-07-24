@@ -62,6 +62,14 @@ SENSOR:sensor_0N:OCCUPIED|VACANT:<seq>\r\n
 FLAME:flame_01:ALERT|CLEAR:<seq>:<energy>\r\n
 ```
 
+### PuTTY 디버그 UI 모드
+
+[`Core/Inc/sensor_protocol.h`](Core/Inc/sensor_protocol.h)의 `SENSOR_DEBUG_UI`를 `1`로
+바꾸면, 위 원본 프로토콜 라인 대신 ANSI escape 기반으로 화면을 제자리에서 갱신하는
+사람이 보기 좋은 상태 테이블(홀센서 4채널 OCCUPIED/VACANT, 화염센서 ALERT/CLEAR +
+energy, 색상 강조)을 PuTTY에 출력한다. **Pi가 파싱할 수 없는 화면이므로 로컬 PuTTY
+테스트 전용** — Pi 연동 시에는 반드시 `0`으로 되돌릴 것(기본값은 `0`).
+
 ## 알려진 CubeMX 버그
 
 CubeMX 2.2.0에서 FreeRTOS 코드를 재생성할 때마다 `freertos.c`의
