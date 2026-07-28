@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include "arm_math.h"
 #include <stdlib.h>
+#include "sensor_queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,43 +71,15 @@ int __io_putchar(int ch)
     return ch;
 }
 
-#define FFT_SIZE 64
-
-#include <stdlib.h>
-
-void fft_test(void)
+/* Fires (from ISR context) every time the circular DMA buffer wraps, i.e.
+ * once per full 1-second/64-sample window. Just signals TaskFlameSensor -
+ * no heavy work here since we're in an interrupt handler. */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    arm_rfft_fast_instance_f32 fft_inst;
-    float32_t input_buf[FFT_SIZE];
-    float32_t output_buf[FFT_SIZE];
-    float32_t mag_buf[FFT_SIZE / 2];
-
-    arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
-
-    float sample_rate = 64.0f; // 64Hz ?ƒ˜?”Œë§?
-
-    for (int i = 0; i < FFT_SIZE; i++)
-    {
-        float t = (float)i / sample_rate;
-
-        // 1~20Hz ???—­?— ê±¸ì³ ?—¬?Ÿ¬ ?„±ë¶? ?„žê¸? (ë¶ˆê½ƒ ê¹œë¹¡?ž„ ?‰?‚´)
-        float signal = 0.5f * arm_sin_f32(2.0f * PI * 3.0f * t)    // 3Hz ?„±ë¶?
-                     + 0.3f * arm_sin_f32(2.0f * PI * 8.0f * t)    // 8Hz ?„±ë¶?
-                     + 0.2f * arm_sin_f32(2.0f * PI * 15.0f * t);  // 15Hz ?„±ë¶?
-
-        // ?•½ê°„ì˜ ?žœ?¤ ?…¸?´ì¦? ì¶”ê?
-        float noise = ((float)(rand() % 100) / 100.0f - 0.5f) * 0.1f;
-
-        input_buf[i] = signal + noise;
-    }
-
-    arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
-    arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
-
-    for (int i = 0; i < FFT_SIZE / 2; i++)
-    {
-        printf("bin %d (%.1f Hz): %.4f\r\n", i, (float)i * sample_rate / FFT_SIZE, mag_buf[i]);
-    }
+  if (hadc->Instance == ADC1)
+  {
+    osSemaphoreRelease(adcBufReadySemHandle);
+  }
 }
 /* USER CODE END 0 */
 
@@ -143,14 +116,17 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
-  fft_test();
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
+
+  /* USER CODE BEGIN RTOS_PERIPH_START */
+  /* adcBufReadySemHandle must exist before conversions can start firing the callback */
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
+  /* USER CODE END RTOS_PERIPH_START */
 
   /* Start scheduler */
   osKernelStart();
@@ -184,12 +160,15 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  /* BYPASS not Crystal: on this Nucleo board HSE comes from the ST-Link's
+   * 8MHz MCO into PH0, there's no resonator on OSC_IN/OSC_OUT.
+   * PLLM=8 -> 8MHz/8=1MHz VCO input, same as before; PLLN/PLLP unchanged so
+   * SYSCLK is still 84MHz and TIM2's 64Hz math doesn't need to change. */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;
   RCC_OscInitStruct.PLL.PLLN = 336;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
   RCC_OscInitStruct.PLL.PLLQ = 7;

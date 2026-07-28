@@ -64,7 +64,13 @@ void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_10;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  /* Was 3CYCLES (fastest, ~143ns @ 21MHz ADC clock) -- too short for a
+   * sensor-module output's source impedance to fully charge the ADC's
+   * sample-hold cap, which compresses readings into a narrow band that
+   * doesn't track the real input. We only need 64 conversions/sec
+   * (15.6ms apart), so there's no reason not to use the max sampling
+   * time for accuracy. */
+  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
