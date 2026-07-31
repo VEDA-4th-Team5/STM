@@ -15,22 +15,39 @@ void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied)
 {
   char line[48];
   hall_sequence++;
-  int len = snprintf(line, sizeof(line), "SENSOR:sensor_%02u:%s:%lu\r\n",
+  int len = snprintf(line, sizeof(line), "SENSOR:HALL%02u:%s:%lu\r\n",
                       (unsigned int)(slot_index + 1),
                       occupied ? "OCCUPIED" : "VACANT",
                       (unsigned long)hall_sequence);
   HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
 }
 
-void SensorProtocol_SendFlameStatus(uint8_t verdict, float energy)
+void SensorProtocol_SendFlameStatus(uint8_t verdict)
 {
   char line[48];
   flame_sequence++;
-  int len = snprintf(line, sizeof(line), "FLAME:flame_01:%s:%lu:%.4f\r\n",
-                      verdict ? "ALERT" : "CLEAR",
-                      (unsigned long)flame_sequence,
-                      (double)energy);
+  int len = snprintf(line, sizeof(line), "FIRE:FLAME01:%s:%lu\r\n",
+                      verdict ? "DETECTED" : "CLEARED",
+                      (unsigned long)flame_sequence);
   HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+}
+
+void SensorProtocol_SendFlameEnergyDebug(float raw_avg, float baseline, float energy,
+                                         float delta, uint8_t raw_verdict,
+                                         uint8_t votes, uint8_t verdict)
+{
+#if FLAME_DEBUG_ENERGY
+  char line[112];
+  int len = snprintf(line, sizeof(line),
+                      "# raw=%.1f base=%.1f e=%.4f d=%.1f hit=%u votes=%u -> %s\r\n",
+                      (double)raw_avg, (double)baseline, (double)energy, (double)delta,
+                      (unsigned)raw_verdict, (unsigned)votes,
+                      verdict ? "DETECTED" : "CLEARED");
+  HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+#else
+  (void)raw_avg; (void)baseline; (void)energy;
+  (void)delta; (void)raw_verdict; (void)votes; (void)verdict;
+#endif
 }
 
 #if SENSOR_DEBUG_UI

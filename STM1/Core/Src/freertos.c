@@ -271,8 +271,13 @@ void StartTaskFlameSensor(void *argument)
 
     uint8_t debounced_verdict = (vote_count >= FLAME_VOTE_THRESHOLD) ? 1 : 0;
 
-    /* Energy is reported every window (for live calibration/telemetry);
-     * only the state field is debounced. */
+    /* energy no longer goes on the wire (the Pi's parser has no field for
+     * it), so expose it here instead for threshold retuning. Compiled out
+     * unless FLAME_DEBUG_ENERGY is on. */
+    SensorProtocol_SendFlameEnergyDebug(raw_avg, baseline_avg, energy, delta,
+                                        raw_verdict, vote_count, debounced_verdict);
+
+    /* Only the state field is debounced. */
     SensorEvent_t evt = {
       .type = EVT_FLAME,
       .slot = 0,
@@ -401,7 +406,7 @@ void StartTaskPacketTX(void *argument)
 #if SENSOR_DEBUG_UI
           SensorDashboard_UpdateFlame(evt.state, evt.energy);
 #else
-          SensorProtocol_SendFlameStatus(evt.state, evt.energy);
+          SensorProtocol_SendFlameStatus(evt.state);
 #endif
           break;
       }
