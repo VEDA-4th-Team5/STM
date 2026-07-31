@@ -188,14 +188,22 @@ void StartTaskFlameSensor(void *argument)
    * UART, not just raw telemetry. Both thresholds below are tuned against
    * real DFR0076 hardware: ignition/hand-movement/fluorescent-light/monitor
    * tests on 2026-07-23 (see docs/), not arbitrary placeholders. */
+  /* Ambient energy measured 0.15~0.61; flame transition spikes hit 10~103.
+   * 5.0 is ~8x over ambient. */
   #define FLAME_ENERGY_THRESHOLD 5.0f
-  /* FFT flicker energy spikes hard at ignition/movement but settles back
-   * toward baseline once a flame burns steady -- great "something just
-   * changed" trigger, bad "still burning" confirmation. Raw DC level is the
-   * opposite: doesn't react fast, but tracks continuous IR intensity while
-   * a flame stays present. Combine them with OR: either one being true
-   * counts as a hit for a given window. */
-  #define FLAME_DELTA_THRESHOLD 40.0f
+  /* FFT flicker energy is the primary signal and usually holds up during a
+   * burn, but once the sensor saturates the window goes flat and the AC
+   * content vanishes -- energy reads exactly 0.0000, observed for up to 9
+   * consecutive windows. Raw DC level is the opposite: slower, but it tracks
+   * continuous IR intensity right through saturation. OR them so either one
+   * alone can carry a window.
+   *
+   * Measured 2026-07-30 at the current sensor gain/distance:
+   *   ambient  raw 46~69     -> delta 0~12      (drift only, no flame)
+   *   flame    raw 1480~4095 -> delta 1427~4042 (pins at ADC full scale)
+   * 300 sits ~13x above the worst ambient drift and ~4.7x below the weakest
+   * flame window. (Was 40, which left only ~3x headroom over ambient.) */
+  #define FLAME_DELTA_THRESHOLD 300.0f
   /* Real flame flicker is chaotic, not a clean steady oscillation -- a small
    * lighter flame can have individual 1-second windows that happen to land
    * calm and read near baseline even while genuinely burning. A strict
@@ -214,8 +222,20 @@ void StartTaskFlameSensor(void *argument)
   uint8_t vote_index = 0;
   uint8_t vote_count = 0; /* running count of 1s currently in vote_history */
 
-  uint8_t baseline_set = 0;
-  float32_t baseline_avg = 0.0f; /* first window's raw average, ambient reference */
+  /* Boot settling. Taking the very first window as the ambient baseline was
+   * unreliable: right after power-up the sensor output (and the ADC/DMA
+   * pipeline) hasn't settled, so the baseline could latch a bogus low value.
+   * Everything after that then sat above threshold, pinning the verdict to
+   * DETECTED forever -- and since it never changed again, no further edge
+   * events were ever emitted, which looked like the sensor going dead.
+   * Discard the first few windows, then average a few more into the baseline. */
+  #define FLAME_SETTLE_WINDOWS   3  /* discarded entirely */
+  #define FLAME_BASELINE_WINDOWS 3  /* averaged into the initial baseline */
+
+  uint32_t window_count = 0;
+  float32_t baseline_accum = 0.0f;
+  uint8_t baseline_ready = 0;
+  float32_t baseline_avg = 0.0f;
 
   arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
 
@@ -235,11 +255,21 @@ void StartTaskFlameSensor(void *argument)
     }
     float32_t raw_avg = (float32_t)adc_sum / FFT_SIZE;
 
-    if (!baseline_set)
+    window_count++;
+    if (window_count <= FLAME_SETTLE_WINDOWS)
     {
-      /* first window after boot: record ambient reference, don't judge yet */
-      baseline_avg = raw_avg;
-      baseline_set = 1;
+      continue; /* still settling -- this reading means nothing yet */
+    }
+
+    if (!baseline_ready)
+    {
+      baseline_accum += raw_avg;
+      if (window_count >= FLAME_SETTLE_WINDOWS + FLAME_BASELINE_WINDOWS)
+      {
+        baseline_avg = baseline_accum / (float32_t)FLAME_BASELINE_WINDOWS;
+        baseline_ready = 1;
+      }
+      continue; /* no verdict until we know what "ambient" looks like */
     }
 
     float32_t delta = raw_avg - baseline_avg;
