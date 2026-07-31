@@ -25,15 +25,20 @@ Raspberry Pi에 전달한다.
 - 1초(64샘플) 단위로 `HAL_ADC_ConvCpltCallback`이 `adcBufReadySem` 세마포어를 release
 - 같은 64샘플 윈도우에서 두 가지 신호를 뽑아 **OR로 결합**하는 하이브리드 판정
   (실물 DFR0076 + 라이터로 실측 검증, 2026-07-23):
-  - **FFT flicker 에너지**(`energy`, 1~20Hz bin 합산): 점화/움직임 순간처럼 급격한
-    변화에 강하게 반응하지만, 불꽃이 안정적으로 지속 연소하면 오히려 baseline
-    수준(심하면 0)까지 가라앉는다 — 카오틱한 실제 불꽃 특성상 "지속 연소"엔 약함
-  - **raw DC 레벨**(`raw_avg`, 부팅 시 baseline 대비 delta): 반응은 느리지만
-    지속적인 IR 세기를 안정적으로 반영 — "지속 연소" 확인에 강함
-  - `raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD=5.0) || (delta >= FLAME_DELTA_THRESHOLD=40.0)`
-  - 카오틱한 flicker로 인한 순간적 소강을 흡수하기 위해 K-of-N 다수결 디바운스
-    적용(최근 5윈도우 중 3개 이상 hit이면 ALERT 유지) — `TaskHallSensor`의 연속
-    디바운스와 달리 sliding window 방식
+  - **FFT flicker 에너지**(`energy`, 1~20Hz bin 합산): 평상시 주력 신호. baseline이
+    1 미만인데 점화 시 40~90대로 뛰고 지속 연소 중에도 대체로 24~93을 유지한다.
+    다만 센서가 완전 포화되면 윈도우 내내 값이 평평해져 AC 성분이 수학적으로 전부
+    사라지면서 **정확히 `0.0000`**이 되는데, 실측에서 9창(9초) 연속 이어진 구간이 있었다
+  - **raw DC 레벨**(`raw_avg`, baseline 대비 delta): 반응은 느리지만 지속적인 IR
+    세기를 안정적으로 반영 — 위 포화 구간의 백업
+  - `raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD=5.0) || (delta >= FLAME_DELTA_THRESHOLD=300.0)`
+  - 임계값 실측 근거(2026-07-30): 평상시 raw 46~69 / delta 0~12 / energy 0.15~0.61,
+    불꽃 raw 1480~4095(ADC 풀스케일 포화) / delta 1427~4042 / energy 0~103
+  - 짧고 산발적인 dip은 K-of-N 다수결 디바운스로 흡수(최근 5윈도우 중 3개 이상 hit)
+    — `TaskHallSensor`의 연속 디바운스와 달리 sliding window 방식. 단 9창 연속 0은
+    5창 중 3창 조건으로 못 버티므로 그 구간은 DC delta 항이 커버함
+  - baseline은 부팅 직후 첫 3창을 버리고(센서/ADC settle) 다음 3창 평균으로 확정.
+    첫 창을 그대로 쓰면 값이 낮게 잡혔을 때 영구 DETECTED로 고착되는 문제가 있었음
   - `energy`는 UART로 내보내지 않는다(Pi 파서에 대응 필드 없음). 임계값 재튜닝이
     필요할 때만 `FLAME_DEBUG_ENERGY`로 확인
   - 손 흔들기(빛 가림)/형광등/모니터 오탐 테스트 통과 확인. 태양광 테스트는 미실시
