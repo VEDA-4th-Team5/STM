@@ -1,7 +1,7 @@
 # STM1 — 홀센서 + 불꽃센서 보드
 
 VEDA 4기 5팀 주차장 감시/제어 시스템의 STM1 보드 펌웨어. NUCLEO-F401RE 기반으로
-홀센서 4채널(CD4051 멀티플렉서)과 불꽃센서(ADC+FFT)를 담당하고, 결과를 UART로
+홀센서 4채널(GPIO 직결)과 불꽃센서(ADC+FFT)를 담당하고, 결과를 UART로
 Raspberry Pi에 전달한다.
 
 ## 개발 환경
@@ -13,8 +13,8 @@ Raspberry Pi에 전달한다.
 ## 클럭 / 핀맵
 
 - 클럭: HSE(bypass, ST-Link MCO 8MHz) 기반 PLL로 84MHz (PLLM=8, PLLN=336, PLLP=÷4)
-- `PA0`(MUX_A) / `PA1`(MUX_B): CD4051 채널 선택 출력
-- `PA4`(MUX_COM, pull-down): 멀티플렉서 출력 읽기
+- 홀센서 D0 4개를 GPIO에 직결(내부 pull-up). D0가 오픈컬렉터라 **LOW = OCCUPIED**:
+  - `PA0`(HALL1_D0) / `PA1`(HALL2_D0) / `PA4`(HALL3_D0) / `PB0`(HALL4_D0)
 - `PC0`(FLAME_A0): 불꽃센서 ADC1 입력 (`PA3`는 USART2 RX라 사용 불가)
 - `PA2`/`PA3`: USART2 (ST-Link VCP, 115200 8N1)
 
@@ -41,7 +41,7 @@ Raspberry Pi에 전달한다.
 
 | 태스크 | 주기/트리거 | 역할 |
 |---|---|---|
-| `TaskHallSensor` | 50ms 폴링 | CD4051 4채널 순회, 채널별 250ms 디바운스 후 상태변화 시에만 이벤트 발행 |
+| `TaskHallSensor` | 50ms 폴링 | 홀센서 4개 GPIO 직접 읽기, 채널별 250ms 디바운스 후 상태변화 시에만 이벤트 발행 |
 | `TaskFlameSensor` | ADC DMA 완료 세마포어 | `adc_buf` 정규화 → FFT → 에너지 계산 → 판정 → 이벤트 발행 |
 | `TaskPacketTX` | `sensorEventQueue` 블로킹 대기 | 이벤트를 받아 UART 포맷으로 인코딩 후 송신 |
 | `defaultTask` | 1s | 현재는 별다른 역할 없음 |
@@ -90,5 +90,5 @@ LoRa(SX1262)는 현재 STM1 통신 경로에 포함되어 있지 않다 — Rasp
 
 남은 것:
 - 태양광 환경에서 불꽃센서 오탐 테스트
-- 실제 CD4051 + 홀센서 4개 장착 후 채널별 독립 동작 재확인
+- 홀센서 4개 실장착 후 채널별 독립 동작 재확인 (CD4051 멀티플렉서는 4채널 브링업에서 OCCUPIED 고착 문제로 제거하고 GPIO 직결로 전환함)
 - Raspberry Pi 파서와 실제 연동 테스트

@@ -297,8 +297,17 @@ void StartTaskHallSensor(void *argument)
   const uint32_t POLL_PERIOD_MS = 50;
   const uint32_t DEBOUNCE_COUNT = 5; /* 5 * 50ms = 250ms stable required */
 
-  /* Per-channel (0~3) tracking, since one physical wire (MUX_COM) carries
-   * all 4 sensors one at a time depending on what MUX_A/MUX_B select. */
+  /* One GPIO per sensor. The CD4051 mux was dropped after 4-channel bring-up:
+   * going through it pinned every channel to OCCUPIED even with no magnet
+   * present, while reading D0 directly worked. Index here is slot_index 0~3,
+   * which the protocol layer maps to sensor 1~4. */
+  GPIO_TypeDef *const hall_port[4] = {
+    HALL1_D0_GPIO_Port, HALL2_D0_GPIO_Port, HALL3_D0_GPIO_Port, HALL4_D0_GPIO_Port
+  };
+  const uint16_t hall_pin[4] = {
+    HALL1_D0_Pin, HALL2_D0_Pin, HALL3_D0_Pin, HALL4_D0_Pin
+  };
+
   uint8_t debounced_state[4] = {0};   /* last confirmed state, sent to Pi */
   uint8_t candidate_state[4] = {0};   /* raw reading being debounced */
   uint32_t stable_count[4] = {0};     /* consecutive reads matching candidate_state */
@@ -306,16 +315,12 @@ void StartTaskHallSensor(void *argument)
 
   for (;;)
   {
-    /* Round-robin through the 4 CD4051 channels: pick a channel via
-     * MUX_A/MUX_B, wait for the analog switch to settle, then read it back
-     * on the shared MUX_COM line. */
     for (uint8_t ch = 0; ch < 4; ch++)
     {
-      HAL_GPIO_WritePin(MUX_A_GPIO_Port, MUX_A_Pin, (ch & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(MUX_B_GPIO_Port, MUX_B_Pin, (ch & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-      osDelay(1); /* mux settle time */
-
-      uint8_t raw = (HAL_GPIO_ReadPin(MUX_COM_GPIO_Port, MUX_COM_Pin) == GPIO_PIN_SET) ? 1 : 0;
+      /* D0 is open-collector: idle (no magnet) floats HIGH via the pull-up,
+       * and a magnet trips the comparator which sinks the line LOW. So LOW
+       * is OCCUPIED, not HIGH. */
+      uint8_t raw = (HAL_GPIO_ReadPin(hall_port[ch], hall_pin[ch]) == GPIO_PIN_RESET) ? 1 : 0;
 
       /* Debounce: only trust a new value once it's been read the same way
        * DEBOUNCE_COUNT times in a row; any different reading resets the count. */
