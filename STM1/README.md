@@ -34,7 +34,8 @@ Raspberry Pi에 전달한다.
   - 카오틱한 flicker로 인한 순간적 소강을 흡수하기 위해 K-of-N 다수결 디바운스
     적용(최근 5윈도우 중 3개 이상 hit이면 ALERT 유지) — `TaskHallSensor`의 연속
     디바운스와 달리 sliding window 방식
-  - UART로는 여전히 `energy`(FFT 값)만 실어보내 Pi 쪽에서 추가 튜닝 여지를 둔다
+  - `energy`는 UART로 내보내지 않는다(Pi 파서에 대응 필드 없음). 임계값 재튜닝이
+    필요할 때만 `FLAME_DEBUG_ENERGY`로 확인
   - 손 흔들기(빛 가림)/형광등/모니터 오탐 테스트 통과 확인. 태양광 테스트는 미실시
 
 ## FreeRTOS 태스크
@@ -58,15 +59,24 @@ Raspberry Pi 팀이 이미 구현해둔 파서 형식을 그대로 따른다(당
 [`Core/Src/sensor_protocol.c`](Core/Src/sensor_protocol.c) 참고.
 
 ```
-SENSOR:sensor_0N:OCCUPIED|VACANT:<seq>\r\n
-FLAME:flame_01:ALERT|CLEAR:<seq>:<energy>\r\n
+SENSOR:HALL01:OCCUPIED|VACANT:<seq>\r\n     (HALL01~HALL04)
+FIRE:FLAME01:DETECTED|CLEARED:<seq>\r\n
 ```
+
+Pi 파서(`SensorProtocolParser`)가 기대하는 형식은 각각
+`SENSOR:<sensor_id>:<OCCUPIED|VACANT>[:seq][:ts]`, `FIRE:<sensor_id>:DETECTED|CLEARED[:seq[:unix_ms]]`.
+센서 ID는 Pi의 `config/parking_slots.json`(HALL01~04)과
+`.env.fire.local`의 `FIRE_SENSOR_SLOT_MAP=FLAME01=EV01`에 맞춘 값이다.
+
+`<seq>`는 스트림별 독립 카운터(홀 4채널 공용 / 화염 별도)로, Pi가 유실·순서뒤바뀜을
+판별하는 데 쓴다. 화염 energy 값은 Pi 파서에 대응 필드가 없어 **전송하지 않는다** —
+임계값 재튜닝이 필요하면 `FLAME_DEBUG_ENERGY`를 켜서 별도 주석 줄로 확인할 것.
 
 ### PuTTY 디버그 UI 모드
 
 [`Core/Inc/sensor_protocol.h`](Core/Inc/sensor_protocol.h)의 `SENSOR_DEBUG_UI`를 `1`로
 바꾸면, 위 원본 프로토콜 라인 대신 ANSI escape 기반으로 화면을 제자리에서 갱신하는
-사람이 보기 좋은 상태 테이블(홀센서 4채널 OCCUPIED/VACANT, 화염센서 ALERT/CLEAR +
+사람이 보기 좋은 상태 테이블(홀센서 4채널 OCCUPIED/VACANT, 화염센서 DETECTED/CLEARED +
 energy, 색상 강조)을 PuTTY에 출력한다. **Pi가 파싱할 수 없는 화면이므로 로컬 PuTTY
 테스트 전용** — Pi 연동 시에는 반드시 `0`으로 되돌릴 것(기본값은 `0`).
 
