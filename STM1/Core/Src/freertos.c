@@ -237,6 +237,9 @@ void StartTaskFlameSensor(void *argument)
   uint8_t baseline_ready = 0;
   float32_t baseline_avg = 0.0f;
 
+  uint8_t last_verdict = 0;    /* last verdict actually put on the wire */
+  uint8_t verdict_seeded = 0;  /* 1 once the boot-time verdict has been recorded */
+
   arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
 
   for (;;)
@@ -307,14 +310,28 @@ void StartTaskFlameSensor(void *argument)
     SensorProtocol_SendFlameEnergyDebug(raw_avg, baseline_avg, energy, delta,
                                         raw_verdict, vote_count, debounced_verdict);
 
-    /* Only the state field is debounced. */
-    SensorEvent_t evt = {
-      .type = EVT_FLAME,
-      .slot = 0,
-      .state = debounced_verdict,
-      .energy = energy
-    };
-    osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+    /* Emit only on a confirmed state change, unlike the hall task's 1s
+     * heartbeat: the Pi expects fire as an edge event, not a repeating
+     * status line. The first window after boot seeds last_verdict without
+     * emitting, so a board coming up in a quiet room doesn't announce a
+     * redundant CLEARED. */
+    if (!verdict_seeded)
+    {
+      last_verdict = debounced_verdict;
+      verdict_seeded = 1;
+    }
+    else if (debounced_verdict != last_verdict)
+    {
+      last_verdict = debounced_verdict;
+
+      SensorEvent_t evt = {
+        .type = EVT_FLAME,
+        .slot = 0,
+        .state = debounced_verdict,
+        .energy = energy
+      };
+      osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+    }
   }
   /* USER CODE END StartTaskFlameSensor */
 }
@@ -343,10 +360,18 @@ void StartTaskHallSensor(void *argument)
     HALL1_D0_Pin, HALL2_D0_Pin, HALL3_D0_Pin, HALL4_D0_Pin
   };
 
+  /* Hall reports on a fixed 1s cadence rather than only on change: the Pi
+   * side agreed on 1~2s polling and treats repeats as idempotent
+   * (DuplicateOccupiedIgnored / DuplicateVacantIgnored), so a steady heartbeat
+   * also doubles as a liveness signal. Debouncing still happens here at 50ms
+   * -- only the confirmed state is ever reported. (Fire is the opposite: it
+   * stays edge-triggered, see StartTaskFlameSensor.) */
+  const uint32_t REPORT_EVERY_N_POLLS = 1000 / POLL_PERIOD_MS; /* 20 * 50ms = 1s */
+  uint32_t poll_tick = 0;
+
   uint8_t debounced_state[4] = {0};   /* last confirmed state, sent to Pi */
   uint8_t candidate_state[4] = {0};   /* raw reading being debounced */
   uint32_t stable_count[4] = {0};     /* consecutive reads matching candidate_state */
-  uint8_t baseline_set[4] = {0};      /* becomes 1 once each channel has an initial value */
 
   for (;;)
   {
@@ -374,25 +399,24 @@ void StartTaskHallSensor(void *argument)
 
       if (stable_count[ch] >= DEBOUNCE_COUNT)
       {
-        if (!baseline_set[ch])
-        {
-          /* first stable read after boot: record baseline, do not emit an event */
-          debounced_state[ch] = candidate_state[ch];
-          baseline_set[ch] = 1;
-        }
-        else if (candidate_state[ch] != debounced_state[ch])
-        {
-          /* Real state change confirmed -> only now do we notify TaskPacketTX. */
-          debounced_state[ch] = candidate_state[ch];
+        debounced_state[ch] = candidate_state[ch];
+      }
+    }
 
-          SensorEvent_t evt = {
-            .type = EVT_HALL,
-            .slot = ch,
-            .state = debounced_state[ch],
-            .energy = 0.0f
-          };
-          osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
-        }
+    /* Report all four slots together once per second. */
+    if (++poll_tick >= REPORT_EVERY_N_POLLS)
+    {
+      poll_tick = 0;
+
+      for (uint8_t ch = 0; ch < 4; ch++)
+      {
+        SensorEvent_t evt = {
+          .type = EVT_HALL,
+          .slot = ch,
+          .state = debounced_state[ch],
+          .energy = 0.0f
+        };
+        osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
       }
     }
 

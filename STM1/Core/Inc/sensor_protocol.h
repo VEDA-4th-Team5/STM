@@ -9,8 +9,15 @@
  * Sensor IDs must match the Pi's config/parking_slots.json (HALL01..HALL04)
  * and .env.fire.local FIRE_SENSOR_SLOT_MAP (FLAME01). Both streams share one
  * UART link, and each carries its own sequence counter so the Pi can spot
- * drops/reorders. The value on the wire is always the *debounced* state --
- * the Pi does no debouncing of its own (contract: debounce is STM32's job).
+ * drops/reorders.
+ *
+ * Cadence differs per stream:
+ *   - HALL  : all four slots reported every 1s, whether or not they changed.
+ *             The Pi agreed on 1~2s polling and ignores duplicates, so this
+ *             doubles as a liveness heartbeat.
+ *   - FIRE  : edge-triggered, emitted only when the verdict actually flips.
+ * Either way the value on the wire is the *debounced* state -- the Pi does
+ * no debouncing of its own (contract: debounce is STM32's job).
  */
 
 /* 1 = human-readable ANSI dashboard on UART for watching in PuTTY (fire/
