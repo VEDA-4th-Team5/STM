@@ -81,6 +81,20 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     osSemaphoreRelease(adcBufReadySemHandle);
   }
 }
+
+/* Fires (from ISR context) on either edge of any of the 4 hall D0 pins.
+ * Same shape as HAL_ADC_ConvCpltCallback above: just wake TaskHallSensor,
+ * no debouncing or UART work here. Which of the 4 slots changed isn't
+ * tracked -- the task re-scans all 4 on wake, same as the old poll loop
+ * did every tick. */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == HALL1_D0_Pin || GPIO_Pin == HALL2_D0_Pin ||
+      GPIO_Pin == HALL3_D0_Pin || GPIO_Pin == HALL4_D0_Pin)
+  {
+    osSemaphoreRelease(hallEdgeSemHandle);
+  }
+}
 /* USER CODE END 0 */
 
 /**
