@@ -59,6 +59,7 @@ extern DMA_HandleTypeDef hdma_adc1;
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim1;
+extern UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN EV */
 
@@ -244,6 +245,17 @@ void DMA2_Stream0_IRQHandler(void)
   /* USER CODE BEGIN DMA2_Stream0_IRQn 1 */
 
   /* USER CODE END DMA2_Stream0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART2 global interrupt. Was never enabled
+  * before (see usart.c) since the link was TX-only; now needed so
+  * AlertCommand_StartReceive()'s HAL_UART_Receive_IT can complete and hand
+  * bytes to HAL_UART_RxCpltCallback (main.c).
+  */
+void USART2_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart2);
 }
 
 /* USER CODE BEGIN 1 */

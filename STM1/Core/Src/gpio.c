@@ -104,6 +104,29 @@ void MX_GPIO_Init(void)
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
+  /* Plate illumination LEDs, one per parking slot -- freed up by moving the
+   * hall sensors above off PA0/PA1/PA4/PB0. Driven through a series
+   * resistor to a small indicator LED for now (see
+   * docs/STM1_plate_led_design_EVDA-194.md); GPIO just sources/sinks the
+   * LED's forward current directly, no transistor stage yet. Output level
+   * is forced low below so the LEDs can't glow between this Init call and
+   * AlertCommand_Init() actually taking over. */
+  HAL_GPIO_WritePin(GPIOA, PLATE_LED1_Pin | PLATE_LED2_Pin | PLATE_LED3_Pin,
+                    GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, PLATE_LED4_Pin, GPIO_PIN_RESET);
+
+  GPIO_InitStruct.Pin = PLATE_LED1_Pin | PLATE_LED2_Pin | PLATE_LED3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = PLATE_LED4_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
 }
 
 /* USER CODE BEGIN 2 */

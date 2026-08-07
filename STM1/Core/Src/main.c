@@ -31,6 +31,7 @@
 #include "arm_math.h"
 #include <stdlib.h>
 #include "sensor_queue.h"
+#include "alert_command.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,6 +96,20 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     osSemaphoreRelease(hallEdgeSemHandle);
   }
 }
+
+/* Fires (from ISR context) once per received USART2 byte -- the link runs
+ * one-byte-at-a-time interrupt mode (see AlertCommand_StartReceive()), not
+ * DMA, since AlertCommand traffic is short and infrequent. All the actual
+ * buffering/parsing is delegated to alert_command.c; this callback only
+ * exists because HAL_UART_RxCpltCallback has to live somewhere, same as
+ * HAL_ADC_ConvCpltCallback and HAL_GPIO_EXTI_Callback above. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    AlertCommand_OnByteReceived();
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -140,6 +155,10 @@ int main(void)
   /* adcBufReadySemHandle must exist before conversions can start firing the callback */
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
+  /* AlertCommand_Init() (freertos.c, RTOS_TIMERS above) already created the
+   * semaphore/timers a received line needs, so it's safe to start taking
+   * bytes now. */
+  AlertCommand_StartReceive();
   /* USER CODE END RTOS_PERIPH_START */
 
   /* Start scheduler */

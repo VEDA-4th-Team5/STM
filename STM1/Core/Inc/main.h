@@ -81,6 +81,14 @@ void Error_Handler(void);
 #define TCK_GPIO_Port GPIOA
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
+#define PLATE_LED1_Pin GPIO_PIN_0
+#define PLATE_LED1_GPIO_Port GPIOA
+#define PLATE_LED2_Pin GPIO_PIN_1
+#define PLATE_LED2_GPIO_Port GPIOA
+#define PLATE_LED3_Pin GPIO_PIN_4
+#define PLATE_LED3_GPIO_Port GPIOA
+#define PLATE_LED4_Pin GPIO_PIN_0
+#define PLATE_LED4_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
