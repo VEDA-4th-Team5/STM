@@ -29,6 +29,7 @@
 #include "arm_math.h"
 #include "sensor_queue.h"
 #include "sensor_protocol.h"
+#include "alert_command.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -143,6 +144,16 @@ const osThreadAttr_t TaskPacketTX_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for TaskCommandRX (EVDA-194: receives the Pi's plate-LED
+ * AlertCommand lines, see alert_command.c). Stack is small on purpose --
+ * AlertCommand_Task() only does short string parsing and a couple of HAL/
+ * RTOS calls per wake, nothing like TaskFlameSensor's FFT buffers. */
+osThreadId_t TaskCommandRXHandle;
+const osThreadAttr_t TaskCommandRX_attributes = {
+  .name = "TaskCommandRX",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -154,6 +165,7 @@ void StartDefaultTask(void *argument);
 void StartTaskFlameSensor(void *argument);
 void StartTaskHallSensor(void *argument);
 void StartTaskPacketTX(void *argument);
+void StartTaskCommandRX(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -181,6 +193,14 @@ void MX_FREERTOS_Init(void) {
 
   flameHeartbeatTimerHandle = osTimerNew(FlameHeartbeatTimerCallback, osTimerPeriodic, NULL, &flameHeartbeatTimer_attributes);
   osTimerStart(flameHeartbeatTimerHandle, 30000);
+
+  /* Creates the line-ready semaphore and the 4 per-LED failsafe one-shot
+   * timers. Grouped here (not a separate RTOS_SEMAPHORES entry) because
+   * AlertCommand owns both and creates them together; see alert_command.c.
+   * Must run before AlertCommand_StartReceive() (main.c,
+   * RTOS_PERIPH_START) so a line can never arrive before these objects
+   * exist. */
+  AlertCommand_Init();
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
@@ -196,6 +216,7 @@ void MX_FREERTOS_Init(void) {
   TaskFlameSensorHandle = osThreadNew(StartTaskFlameSensor, NULL, &TaskFlameSensor_attributes);
   TaskHallSensorHandle = osThreadNew(StartTaskHallSensor, NULL, &TaskHallSensor_attributes);
   TaskPacketTXHandle = osThreadNew(StartTaskPacketTX, NULL, &TaskPacketTX_attributes);
+  TaskCommandRXHandle = osThreadNew(StartTaskCommandRX, NULL, &TaskCommandRX_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
 
@@ -604,6 +625,24 @@ void StartTaskPacketTX(void *argument)
     }
   }
   /* USER CODE END StartTaskPacketTX */
+}
+
+/* USER CODE BEGIN Header_StartTaskCommandRX */
+/**
+* @brief Function implementing the TaskCommandRX thread. Blocks on the
+* line-ready semaphore AlertCommand_OnByteReceived (main.c, ISR context)
+* releases, then parses and acts on one AlertCommand line per wake. See
+* alert_command.c/.h.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTaskCommandRX */
+void StartTaskCommandRX(void *argument)
+{
+  /* USER CODE BEGIN StartTaskCommandRX */
+  (void)argument;
+  AlertCommand_Task();
+  /* USER CODE END StartTaskCommandRX */
 }
 
 /* Private application code --------------------------------------------------*/

@@ -51,7 +51,12 @@ void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
-
+  /* Originally TX-only (blocking HAL_UART_Transmit), so the global IRQ was
+   * never enabled. AlertCommand_StartReceive() needs it live before it can
+   * call HAL_UART_Receive_IT; priority 5 matches the other ISRs that touch
+   * FreeRTOS objects in this project (see gpio.c). */
+  HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE END USART2_Init 2 */
 
 }
