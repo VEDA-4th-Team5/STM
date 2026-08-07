@@ -163,6 +163,34 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles EXTI line4 interrupt (HALL3, PB4).
+  */
+void EXTI4_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(HALL3_D0_Pin);
+}
+
+/**
+  * @brief This function handles EXTI line[9:5] interrupts. Shared by two of
+  * our pins: HALL1 (PA8, pin 8) and HALL4 (PB5, pin 5). Each
+  * HAL_GPIO_EXTI_IRQHandler call only does something if that specific
+  * pin's own pending flag is set, so it's safe to call both unconditionally.
+  */
+void EXTI9_5_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(HALL1_D0_Pin);
+  HAL_GPIO_EXTI_IRQHandler(HALL4_D0_Pin);
+}
+
+/**
+  * @brief This function handles EXTI line[15:10] interrupt (HALL2, PB10).
+  */
+void EXTI15_10_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(HALL2_D0_Pin);
+}
+
+/**
   * @brief This function handles ADC1 global interrupt.
   */
 void ADC_IRQHandler(void)

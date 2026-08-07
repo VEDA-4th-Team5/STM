@@ -18,5 +18,6 @@ typedef struct {
 
 extern osMessageQueueId_t sensorEventQueueHandle;
 extern osSemaphoreId_t adcBufReadySemHandle;
+extern osSemaphoreId_t hallEdgeSemHandle;
 
 #endif /* __SENSOR_QUEUE_H */

@@ -66,6 +66,54 @@ osSemaphoreId_t adcBufReadySemHandle;
 const osSemaphoreAttr_t adcBufReadySem_attributes = {
   .name = "adcBufReadySem"
 };
+
+/* Released by HAL_GPIO_EXTI_Callback (main.c) on either edge of any of the
+ * 4 hall D0 pins, so TaskHallSensor can block instead of polling every
+ * 50ms -- same shape as adcBufReadySemHandle above. */
+osSemaphoreId_t hallEdgeSemHandle;
+const osSemaphoreAttr_t hallEdgeSem_attributes = {
+  .name = "hallEdgeSem"
+};
+
+/* Hall debounce state, kept at file scope (was local to
+ * StartTaskHallSensor) so the confirmed value and the last-reported value
+ * can be compared across wakes. */
+static uint8_t hall_debounced_state[4] = {0};
+static uint8_t hall_candidate_state[4] = {0};
+static uint32_t hall_stable_count[4] = {0};
+/* Last state actually put on the wire per slot -- lets TaskHallSensor emit
+ * only on a confirmed change instead of a fixed cadence, same as
+ * TaskFlameSensor's last_verdict. */
+static uint8_t hall_last_reported_state[4] = {0};
+
+/* Fires every 30s regardless of GPIO activity: resends whatever
+ * hall_debounced_state currently holds, purely as a liveness signal. Edge
+ * changes are still reported instantly by TaskHallSensor above -- this
+ * timer exists only so the Pi side can tell "nothing changed in a while"
+ * apart from "the STM32/UART link died", which pure on-change reporting
+ * can't distinguish. The Pi's duplicate/stale-sequence guard already
+ * treats repeats as safe, so re-sending unchanged state here is fine. */
+osTimerId_t hallHeartbeatTimerHandle;
+const osTimerAttr_t hallHeartbeatTimer_attributes = {
+  .name = "hallHeartbeatTimer"
+};
+
+/* Last verdict actually put on the wire by TaskFlameSensor, and whether the
+ * boot-time baseline/first verdict has been recorded yet. Moved out of
+ * StartTaskFlameSensor's locals (was last_verdict/verdict_seeded) so
+ * FlameHeartbeatTimerCallback below can read the current value too. */
+static uint8_t flame_last_verdict = 0;
+static uint8_t flame_verdict_seeded = 0;
+
+/* Same idea as hallHeartbeatTimerHandle: every 30s, resend the last flame
+ * verdict regardless of change, purely as a liveness signal. Actual
+ * ALERT/CLEAR transitions are still reported instantly by
+ * TaskFlameSensor. Guarded on flame_verdict_seeded so it can't fire before
+ * the boot baseline is established (see FLAME_SETTLE_WINDOWS below). */
+osTimerId_t flameHeartbeatTimerHandle;
+const osTimerAttr_t flameHeartbeatTimer_attributes = {
+  .name = "flameHeartbeatTimer"
+};
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -98,7 +146,8 @@ const osThreadAttr_t TaskPacketTX_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-
+static void HallHeartbeatTimerCallback(void *argument);
+static void FlameHeartbeatTimerCallback(void *argument);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -123,10 +172,15 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   adcBufReadySemHandle = osSemaphoreNew(1, 0, &adcBufReadySem_attributes);
+  hallEdgeSemHandle = osSemaphoreNew(1, 0, &hallEdgeSem_attributes);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
+  hallHeartbeatTimerHandle = osTimerNew(HallHeartbeatTimerCallback, osTimerPeriodic, NULL, &hallHeartbeatTimer_attributes);
+  osTimerStart(hallHeartbeatTimerHandle, 30000);
 
+  flameHeartbeatTimerHandle = osTimerNew(FlameHeartbeatTimerCallback, osTimerPeriodic, NULL, &flameHeartbeatTimer_attributes);
+  osTimerStart(flameHeartbeatTimerHandle, 30000);
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
@@ -237,9 +291,6 @@ void StartTaskFlameSensor(void *argument)
   uint8_t baseline_ready = 0;
   float32_t baseline_avg = 0.0f;
 
-  uint8_t last_verdict = 0;    /* last verdict actually put on the wire */
-  uint8_t verdict_seeded = 0;  /* 1 once the boot-time verdict has been recorded */
-
   arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
 
   for (;;)
@@ -310,19 +361,20 @@ void StartTaskFlameSensor(void *argument)
     SensorProtocol_SendFlameEnergyDebug(raw_avg, baseline_avg, energy, delta,
                                         raw_verdict, vote_count, debounced_verdict);
 
-    /* Emit only on a confirmed state change, unlike the hall task's 1s
-     * heartbeat: the Pi expects fire as an edge event, not a repeating
-     * status line. The first window after boot seeds last_verdict without
-     * emitting, so a board coming up in a quiet room doesn't announce a
-     * redundant CLEARED. */
-    if (!verdict_seeded)
+    /* Emit only on a confirmed state change: the Pi expects fire as an edge
+     * event, not a repeating status line. FlameHeartbeatTimerCallback below
+     * covers the separate "is the link even alive" concern on its own 30s
+     * cadence. The first window after boot seeds flame_last_verdict
+     * without emitting, so a board coming up in a quiet room doesn't
+     * announce a redundant CLEARED. */
+    if (!flame_verdict_seeded)
     {
-      last_verdict = debounced_verdict;
-      verdict_seeded = 1;
+      flame_last_verdict = debounced_verdict;
+      flame_verdict_seeded = 1;
     }
-    else if (debounced_verdict != last_verdict)
+    else if (debounced_verdict != flame_last_verdict)
     {
-      last_verdict = debounced_verdict;
+      flame_last_verdict = debounced_verdict;
 
       SensorEvent_t evt = {
         .type = EVT_FLAME,
@@ -336,6 +388,39 @@ void StartTaskFlameSensor(void *argument)
   /* USER CODE END StartTaskFlameSensor */
 }
 
+/* USER CODE BEGIN Header_FlameHeartbeatTimerCallback */
+/**
+* @brief 30s liveness heartbeat, independent of the edge-triggered reports
+* in StartTaskFlameSensor above: resends flame_last_verdict so the Pi can
+* tell "quiet sensor" apart from "dead link". No-op until
+* flame_verdict_seeded is set (i.e. until the boot baseline is ready) so it
+* can't leak a bogus verdict before TaskFlameSensor has ever recorded one.
+* Runs in the Timer Service Task context (not ISR), so calling
+* osMessageQueuePut directly here is safe.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_FlameHeartbeatTimerCallback */
+static void FlameHeartbeatTimerCallback(void *argument)
+{
+  /* USER CODE BEGIN FlameHeartbeatTimerCallback */
+  (void)argument;
+
+  if (!flame_verdict_seeded)
+  {
+    return;
+  }
+
+  SensorEvent_t evt = {
+    .type = EVT_FLAME,
+    .slot = 0,
+    .state = flame_last_verdict,
+    .energy = 0.0f
+  };
+  osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+  /* USER CODE END FlameHeartbeatTimerCallback */
+}
+
 /* USER CODE BEGIN Header_StartTaskHallSensor */
 /**
 * @brief Function implementing the TaskHallSensor thread.
@@ -346,13 +431,16 @@ void StartTaskFlameSensor(void *argument)
 void StartTaskHallSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskHallSensor */
-  const uint32_t POLL_PERIOD_MS = 50;
-  const uint32_t DEBOUNCE_COUNT = 5; /* 5 * 50ms = 250ms stable required */
+  const uint32_t SAMPLE_INTERVAL_MS = 50;  /* same cadence as the old poll loop */
+  const uint32_t DEBOUNCE_COUNT = 5;       /* 5 * 50ms = 250ms stable required, unchanged */
+  const uint32_t CONFIRM_ITERATIONS = 6;   /* 300ms settle window per wake: enough for one full debounce plus margin */
 
   /* One GPIO per sensor. The CD4051 mux was dropped after 4-channel bring-up:
    * going through it pinned every channel to OCCUPIED even with no magnet
    * present, while reading D0 directly worked. Index here is slot_index 0~3,
-   * which the protocol layer maps to sensor 1~4. */
+   * which the protocol layer maps to sensor 1~4. HALL1/2/3/4 are on
+   * PA8/PB10/PB4/PB5 -- picked so no two share an EXTI line number, see
+   * gpio.c. */
   GPIO_TypeDef *const hall_port[4] = {
     HALL1_D0_GPIO_Port, HALL2_D0_GPIO_Port, HALL3_D0_GPIO_Port, HALL4_D0_GPIO_Port
   };
@@ -360,69 +448,118 @@ void StartTaskHallSensor(void *argument)
     HALL1_D0_Pin, HALL2_D0_Pin, HALL3_D0_Pin, HALL4_D0_Pin
   };
 
-  /* Hall reports on a fixed 1s cadence rather than only on change: the Pi
-   * side agreed on 1~2s polling and treats repeats as idempotent
-   * (DuplicateOccupiedIgnored / DuplicateVacantIgnored), so a steady heartbeat
-   * also doubles as a liveness signal. Debouncing still happens here at 50ms
-   * -- only the confirmed state is ever reported. (Fire is the opposite: it
-   * stays edge-triggered, see StartTaskFlameSensor.) */
-  const uint32_t REPORT_EVERY_N_POLLS = 1000 / POLL_PERIOD_MS; /* 20 * 50ms = 1s */
-  uint32_t poll_tick = 0;
+  /* This used to be a 50ms poll loop that scanned all 4 channels forever
+   * and reported all 4 on a fixed 1s tick regardless of change. Now the 4
+   * D0 pins are EXTI (both edges, see gpio.c) and HAL_GPIO_EXTI_Callback
+   * (main.c) just releases hallEdgeSemHandle -- same "ISR signals, task
+   * does the work" shape as TaskFlameSensor's adcBufReadySemHandle.
+   * Reporting is also edge-triggered now, same as TaskFlameSensor: only a
+   * confirmed change goes out over UART, not a repeating status line. The
+   * debounce logic itself (N consecutive matching reads) is unchanged --
+   * only the outer drive (always-on tick vs. wake-on-edge) and the report
+   * condition (fixed cadence vs. on-change) changed. */
 
-  uint8_t debounced_state[4] = {0};   /* last confirmed state, sent to Pi */
-  uint8_t candidate_state[4] = {0};   /* raw reading being debounced */
-  uint32_t stable_count[4] = {0};     /* consecutive reads matching candidate_state */
+  /* One full scan before ever blocking, seeding both the debounced and the
+   * last-reported state without emitting -- same idea as TaskFlameSensor's
+   * verdict_seeded boot window, just instantaneous here since there's no
+   * ambient signal to average. Without this, a sensor already occupied at
+   * boot would never be reported until its next physical transition. */
+  for (uint8_t ch = 0; ch < 4; ch++)
+  {
+    uint8_t raw = (HAL_GPIO_ReadPin(hall_port[ch], hall_pin[ch]) == GPIO_PIN_RESET) ? 1 : 0;
+    hall_candidate_state[ch] = raw;
+    hall_stable_count[ch] = DEBOUNCE_COUNT;
+    hall_debounced_state[ch] = raw;
+    hall_last_reported_state[ch] = raw;
+  }
 
   for (;;)
   {
-    for (uint8_t ch = 0; ch < 4; ch++)
+    /* Blocks here until HAL_GPIO_EXTI_Callback signals an edge on any of
+     * the 4 hall pins. */
+    osSemaphoreAcquire(hallEdgeSemHandle, osWaitForever);
+
+    for (uint32_t i = 0; i < CONFIRM_ITERATIONS; i++)
     {
-      /* D0 is open-collector: idle (no magnet) floats HIGH via the pull-up,
-       * and a magnet trips the comparator which sinks the line LOW. So LOW
-       * is OCCUPIED, not HIGH. */
-      uint8_t raw = (HAL_GPIO_ReadPin(hall_port[ch], hall_pin[ch]) == GPIO_PIN_RESET) ? 1 : 0;
-
-      /* Debounce: only trust a new value once it's been read the same way
-       * DEBOUNCE_COUNT times in a row; any different reading resets the count. */
-      if (raw == candidate_state[ch])
-      {
-        if (stable_count[ch] < DEBOUNCE_COUNT)
-        {
-          stable_count[ch]++;
-        }
-      }
-      else
-      {
-        candidate_state[ch] = raw;
-        stable_count[ch] = 1;
-      }
-
-      if (stable_count[ch] >= DEBOUNCE_COUNT)
-      {
-        debounced_state[ch] = candidate_state[ch];
-      }
-    }
-
-    /* Report all four slots together once per second. */
-    if (++poll_tick >= REPORT_EVERY_N_POLLS)
-    {
-      poll_tick = 0;
-
       for (uint8_t ch = 0; ch < 4; ch++)
       {
-        SensorEvent_t evt = {
-          .type = EVT_HALL,
-          .slot = ch,
-          .state = debounced_state[ch],
-          .energy = 0.0f
-        };
-        osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
-      }
-    }
+        /* D0 is open-collector: idle (no magnet) floats HIGH via the pull-up,
+         * and a magnet trips the comparator which sinks the line LOW. So LOW
+         * is OCCUPIED, not HIGH. */
+        uint8_t raw = (HAL_GPIO_ReadPin(hall_port[ch], hall_pin[ch]) == GPIO_PIN_RESET) ? 1 : 0;
 
-    osDelay(POLL_PERIOD_MS);
+        /* Debounce: only trust a new value once it's been read the same way
+         * DEBOUNCE_COUNT times in a row; any different reading resets the count. */
+        if (raw == hall_candidate_state[ch])
+        {
+          if (hall_stable_count[ch] < DEBOUNCE_COUNT)
+          {
+            hall_stable_count[ch]++;
+          }
+        }
+        else
+        {
+          hall_candidate_state[ch] = raw;
+          hall_stable_count[ch] = 1;
+        }
+
+        if (hall_stable_count[ch] >= DEBOUNCE_COUNT)
+        {
+          hall_debounced_state[ch] = hall_candidate_state[ch];
+
+          /* Emit only on a confirmed change from what was last put on the
+           * wire -- repeated confirmations of the same value (e.g. more
+           * iterations in this window, or a later wake with no real
+           * change) must not re-send. */
+          if (hall_debounced_state[ch] != hall_last_reported_state[ch])
+          {
+            hall_last_reported_state[ch] = hall_debounced_state[ch];
+
+            SensorEvent_t evt = {
+              .type = EVT_HALL,
+              .slot = ch,
+              .state = hall_debounced_state[ch],
+              .energy = 0.0f
+            };
+            osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+          }
+        }
+      }
+
+      osDelay(SAMPLE_INTERVAL_MS);
+    }
   }
   /* USER CODE END StartTaskHallSensor */
+}
+
+/* USER CODE BEGIN Header_HallHeartbeatTimerCallback */
+/**
+* @brief 30s liveness heartbeat, independent of the edge-triggered reports
+* in StartTaskHallSensor above: resends whatever hall_debounced_state
+* currently holds so the Pi can tell "quiet sensor" apart from "dead
+* link". Runs in the Timer Service Task context (not ISR), so calling
+* osMessageQueuePut directly here is safe -- same as every other non-ISR
+* call site in this file.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_HallHeartbeatTimerCallback */
+static void HallHeartbeatTimerCallback(void *argument)
+{
+  /* USER CODE BEGIN HallHeartbeatTimerCallback */
+  (void)argument;
+
+  for (uint8_t ch = 0; ch < 4; ch++)
+  {
+    SensorEvent_t evt = {
+      .type = EVT_HALL,
+      .slot = ch,
+      .state = hall_debounced_state[ch],
+      .energy = 0.0f
+    };
+    osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+  }
+  /* USER CODE END HallHeartbeatTimerCallback */
 }
 
 /* USER CODE BEGIN Header_StartTaskPacketTX */
