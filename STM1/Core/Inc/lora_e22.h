@@ -284,6 +284,50 @@ uint32_t LoRa_GetLastTxBusyMs(void);
 uint32_t LoRa_GetMaxTxBusyMs(void);
 uint16_t          LoRa_Recv(uint8_t *buf, uint16_t maxlen, uint32_t timeout_ms);
 
+/* -------------------------------------------------------------------------- */
+/* 인터럽트 수신 (하행 명령용)                                                */
+/* -------------------------------------------------------------------------- */
+/*
+ * LoRa_Recv() 는 블로킹 폴링이라 "부르는 동안에만" 듣는다. 호출 사이에 도착한
+ * 바이트는 그대로 사라지고, 기다리는 동안 CPU 도 태운다. 브링업 진단에는
+ * 충분했지만 Pi 가 실제로 명령을 보내는 구조에서는 쓸 수 없다.
+ *
+ * 아래는 항상 듣는 경로다. USART1 인터럽트가 바이트를 링버퍼에 넣고,
+ * 태스크가 꺼내 프레임으로 조립한다.
+ *
+ * !! 설정 모드(LoRa_ConfigureFull 등)는 블로킹 수신을 쓰므로 인터럽트 수신과
+ *    같이 돌 수 없다. 반드시 설정이 끝난 뒤에 LoRa_StartReceiveIT() 를 부를 것.
+ */
+#define LORA_RX_RING_SIZE 256u
+
+/** @brief 인터럽트 수신을 시작한다. 설정 완료 후 한 번만 호출. */
+void LoRa_StartReceiveIT(void);
+
+/** @brief USART1 수신 완료 ISR 에서 호출 (main.c 의 HAL_UART_RxCpltCallback). */
+void LoRa_OnByteReceived(void);
+
+/**
+ * @brief  링버퍼에서 한 바이트 꺼낸다.
+ * @retval true 꺼냈음 / false 비어 있음
+ */
+bool LoRa_RingPop(uint8_t *out);
+
+/** @brief 인터럽트 수신 중 버려진 바이트 수(링버퍼 오버런). 0 이어야 정상. */
+uint32_t LoRa_GetRxOverrunCount(void);
+
+/**
+ * @brief  수신이 꺼져 있으면 다시 건다. 주기적으로 호출할 것.
+ * @retval true 실제로 되살렸음 (= 죽어 있었다는 뜻)
+ *
+ * HAL 의 인터럽트 수신은 바이트마다 재무장이 필요한데, 그 호출이 한 번이라도
+ * HAL_BUSY 를 받으면 그대로 멈춘다. 로그도 안 남고 송신은 멀쩡해서 원인을
+ * 찾기 어렵다. 원인을 하나씩 막는 대신 상태를 보고 되살린다.
+ */
+bool LoRa_EnsureReceiving(void);
+
+/** @brief 위 함수가 수신을 되살린 횟수. 0 이 아니면 어딘가에서 끊긴 것이다. */
+uint32_t LoRa_GetRxRearmCount(void);
+
 /**
  * @brief  Bring-up check: enters config mode, reads all 9 parameter bytes,
  *         dumps them decoded over printf, then returns to normal mode.

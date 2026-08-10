@@ -714,6 +714,91 @@ HAL_StatusTypeDef LoRa_Send(const uint8_t *buf, uint16_t len)
   return LoRa_SendTo(LORA_PEER_ADDRESS, LORA_CH_DATA_DEFAULT, buf, len);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 인터럽트 수신                                                              */
+/* -------------------------------------------------------------------------- */
+
+static uint8_t  lora_rx_ring[LORA_RX_RING_SIZE];
+static volatile uint16_t lora_rx_head = 0;   /* ISR 이 쓴다 */
+static volatile uint16_t lora_rx_tail = 0;   /* 태스크가 쓴다 */
+static volatile uint32_t lora_rx_overrun = 0;
+static uint8_t  lora_rx_byte;                /* HAL 이 채우는 1바이트 */
+
+void LoRa_StartReceiveIT(void)
+{
+  /* USART1 은 드라이버가 직접 초기화하므로 NVIC 도 여기서 켠다.
+   * 우선순위는 FreeRTOS API 를 부를 수 있는 범위(configMAX_SYSCALL...) 밖으로
+   * 올리면 안 된다 -- 이 ISR 은 세마포어를 건드리지 않지만, 나중에 누가
+   * 추가할 수 있으므로 다른 ISR 들과 같은 대역에 둔다. */
+  HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
+  HAL_UART_Receive_IT(&hlora, &lora_rx_byte, 1);
+}
+
+void LoRa_OnByteReceived(void)
+{
+  uint8_t b = lora_rx_byte;
+
+  /* 다음 바이트를 놓치지 않도록 먼저 재무장한다. */
+  HAL_UART_Receive_IT(&hlora, &lora_rx_byte, 1);
+
+  uint16_t next = (uint16_t)((lora_rx_head + 1u) % LORA_RX_RING_SIZE);
+  if (next == lora_rx_tail)
+  {
+    /* 태스크가 못 따라왔다. 새 바이트를 버린다 -- 오래된 것을 밀어내면
+     * 프레임 중간이 잘려 더 나쁘다. 이 카운터가 0 이 아니면 링버퍼를
+     * 키우거나 소비 주기를 줄여야 한다. */
+    lora_rx_overrun++;
+    return;
+  }
+  lora_rx_ring[lora_rx_head] = b;
+  lora_rx_head = next;
+}
+
+bool LoRa_RingPop(uint8_t *out)
+{
+  if (lora_rx_tail == lora_rx_head) return false;
+  *out = lora_rx_ring[lora_rx_tail];
+  lora_rx_tail = (uint16_t)((lora_rx_tail + 1u) % LORA_RX_RING_SIZE);
+  return true;
+}
+
+uint32_t LoRa_GetRxOverrunCount(void)
+{
+  return lora_rx_overrun;
+}
+
+static uint32_t lora_rx_rearm_count = 0;
+
+uint32_t LoRa_GetRxRearmCount(void)
+{
+  return lora_rx_rearm_count;
+}
+
+bool LoRa_EnsureReceiving(void)
+{
+  /* 인터럽트 수신은 바이트마다 다시 걸어야 하는데, 그 재무장이 한 번이라도
+   * HAL_BUSY 를 돌려받으면 그 순간부터 영영 듣지 않는다. 송신과 타이밍이
+   * 겹치거나 오버런 처리 중이면 실제로 일어난다. 게다가 조용히 죽어서
+   * 로그조차 안 남는다 -- 실측에서 "첫 프레임만 받고 그 뒤로 무응답" 으로
+   * 나타났다.
+   *
+   * 그래서 원인을 하나씩 막는 대신, 주기적으로 상태를 확인해서 꺼져 있으면
+   * 다시 건다. 정상일 때는 아무 비용도 없다. */
+  if (hlora.RxState == HAL_UART_STATE_BUSY_RX)
+  {
+    return false;
+  }
+
+  __HAL_UART_CLEAR_OREFLAG(&hlora);
+  if (HAL_UART_Receive_IT(&hlora, &lora_rx_byte, 1) == HAL_OK)
+  {
+    lora_rx_rearm_count++;
+    return true;
+  }
+  return false;
+}
+
 uint16_t LoRa_Recv(uint8_t *buf, uint16_t maxlen, uint32_t timeout_ms)
 {
   uint16_t n = 0;
