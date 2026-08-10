@@ -39,18 +39,25 @@ static void LoRa_GPIO_Init(void)
 {
   GPIO_InitTypeDef gpio = {0};
 
+  /* M0/M1 은 서로 다른 포트에 있다(PC7 / PB6). 한 번에 못 초기화하므로
+   * 각각 따로 부른다 -- 핀을 옮길 때 여기를 같이 고쳐야 한다. */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
-  gpio.Pin   = LORA_M0_Pin | LORA_M1_Pin;
   gpio.Mode  = GPIO_MODE_OUTPUT_PP;
   gpio.Pull  = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &gpio);
+
+  gpio.Pin = LORA_M0_Pin;
+  HAL_GPIO_Init(LORA_M0_GPIO_Port, &gpio);
+
+  gpio.Pin = LORA_M1_Pin;
+  HAL_GPIO_Init(LORA_M1_GPIO_Port, &gpio);
 
 #if LORA_AUX_ENABLE
   /* AUX 는 모듈이 미는 출력이므로 입력으로 받는다. 풀업을 거는 이유는
    * 미배선일 때 HIGH(=idle)로 읽혀 예전 동작으로 안전하게 떨어지기 위함이다. */
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   gpio.Pin   = LORA_AUX_Pin;
   gpio.Mode  = GPIO_MODE_INPUT;
   gpio.Pull  = GPIO_PULLUP;
@@ -379,7 +386,7 @@ void LoRa_CheckNormalMode(void)
     printf("  => M1 이 모듈에 닿지 않는다. 일반 모드로 못 내려가고 설정 모드에\r\n");
     printf("     갇혀 있다. 그래서 LoRa_Send() 가 보낸 바이트는 전파가 아니라\r\n");
     printf("     설정 명령으로 해석돼 버려진다 -- 송신도 수신도 안 되는 이유.\r\n");
-    printf("     확인: Nucleo D4(PB5) <-> 모듈 6번(M1) 배선/납땜\r\n");
+    printf("     확인: Nucleo D10(PB6) <-> 모듈 6번(M1) 배선/납땜\r\n");
   }
   else
   {
@@ -1088,8 +1095,8 @@ void LoRa_ShortTest(void)
 
   printf("  PA9  (RXD) driven low -> reads %d %s\r\n", a9,  a9  ? "*** SHORTED ***" : "ok");
   printf("  PA10 (TXD) driven low -> reads %d %s\r\n", a10, a10 ? "*** SHORTED ***" : "ok");
-  printf("  PB4  (M0)  driven low -> reads %d %s\r\n", b4,  b4  ? "*** SHORTED ***" : "ok");
-  printf("  PB5  (M1)  driven low -> reads %d %s\r\n", b5,  b5  ? "*** SHORTED ***" : "ok");
+  printf("  PC7  (M0)  driven low -> reads %d %s\r\n", b4,  b4  ? "*** SHORTED ***" : "ok");
+  printf("  PB6  (M1)  driven low -> reads %d %s\r\n", b5,  b5  ? "*** SHORTED ***" : "ok");
 
   if (a9 || a10 || b4 || b5)
   {
@@ -1123,7 +1130,7 @@ void LoRa_Diag(void)
   /* 1) Are the mode pins actually being driven? Read back the output latch
         and the real pin level -- they differ if something is shorting it. */
   LoRa_SetMode(LORA_MODE_CONFIG);
-  printf("[pins] M0(PB4) latch=%d pin=%d | M1(PB5) latch=%d pin=%d  (config = M1:1 M0:0)\r\n",
+  printf("[pins] M0(PC7) latch=%d pin=%d | M1(PB6) latch=%d pin=%d  (config = M1:1 M0:0)\r\n",
          (int)((LORA_M0_GPIO_Port->ODR & LORA_M0_Pin) ? 1 : 0),
          (int)HAL_GPIO_ReadPin(LORA_M0_GPIO_Port, LORA_M0_Pin),
          (int)((LORA_M1_GPIO_Port->ODR & LORA_M1_Pin) ? 1 : 0),

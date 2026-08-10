@@ -12,11 +12,14 @@
   * Hardware notes for this board (NUCLEO-F401RE):
   *   USART1 TX  PA9  (D8)  ---> module RXD
   *   USART1 RX  PA10 (D2)  <--- module TXD
-  *   GPIO       PB4  (D5)  ---> module M0
-  *   GPIO       PB5  (D4)  ---> module M1
+  *   GPIO       PC7  (D9)  ---> module M0
+  *   GPIO       PB6  (D10) ---> module M1
+  *   GPIO       PA7  (D11) <--- module AUX
   *
-  * AUX is not soldered on our modules, so every state wait is a fixed delay
-  * instead of an AUX poll. See LORA_MODE_SWITCH_DELAY_MS.
+  * M0/M1/AUX 는 원래 PB4/PB5/PA8 이었는데, 번호판 LED 작업(EVDA-194)이
+  * 홀센서를 그 자리로 옮기게 되어 비켜났다. 셋 다 평범한 GPIO 라 어디로
+  * 가도 되지만 USART1 은 PA9/PA10 (대체 PB6/PB7) 뿐이라 옮길 여지가 없다.
+  * 지금 배치는 D8~D11 이 CN5 에 연속으로 붙어 배선이 한 줄로 정리된다.
   ******************************************************************************
   */
 
@@ -46,13 +49,13 @@ extern "C" {
  */
 #define LORA_AUX_ENABLE     1
 #define LORA_AUX_GPIO_Port  GPIOA
-#define LORA_AUX_Pin        GPIO_PIN_8
+#define LORA_AUX_Pin        GPIO_PIN_7
 #define LORA_AUX_TIMEOUT_MS 2000u   /* 이 안에 idle 로 안 오면 포기하고 진행 */
 
-#define LORA_M0_GPIO_Port   GPIOB
-#define LORA_M0_Pin         GPIO_PIN_4
+#define LORA_M0_GPIO_Port   GPIOC
+#define LORA_M0_Pin         GPIO_PIN_7
 #define LORA_M1_GPIO_Port   GPIOB
-#define LORA_M1_Pin         GPIO_PIN_5
+#define LORA_M1_Pin         GPIO_PIN_6
 
 /* Timing (no AUX pin -> fixed delays) -------------------------------------- */
 #define LORA_MODE_SWITCH_DELAY_MS   100u  /* datasheet needs ~2ms, 100 is safe */
