@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include "sensor_queue.h"
 #include "sensor_protocol.h"
+#include "alert_command.h"
 #include "lora_e22.h"
 #include "lora_frame.h"
 /* USER CODE END Includes */
@@ -82,6 +83,34 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
   if (hadc->Instance == ADC1)
   {
     osSemaphoreRelease(adcBufReadySemHandle);
+  }
+}
+
+/* Fires (from ISR context) on either edge of any of the 4 hall D0 pins.
+ * Same shape as HAL_ADC_ConvCpltCallback above: just wake TaskHallSensor,
+ * no debouncing or UART work here. Which of the 4 slots changed isn't
+ * tracked -- the task re-scans all 4 on wake, same as the old poll loop
+ * did every tick. */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == HALL1_D0_Pin || GPIO_Pin == HALL2_D0_Pin ||
+      GPIO_Pin == HALL3_D0_Pin || GPIO_Pin == HALL4_D0_Pin)
+  {
+    osSemaphoreRelease(hallEdgeSemHandle);
+  }
+}
+
+/* Fires (from ISR context) once per received USART2 byte -- the link runs
+ * one-byte-at-a-time interrupt mode (see AlertCommand_StartReceive()), not
+ * DMA, since AlertCommand traffic is short and infrequent. All the actual
+ * buffering/parsing is delegated to alert_command.c; this callback only
+ * exists because HAL_UART_RxCpltCallback has to live somewhere, same as
+ * HAL_ADC_ConvCpltCallback and HAL_GPIO_EXTI_Callback above. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    AlertCommand_OnByteReceived();
   }
 }
 /* USER CODE END 0 */
@@ -147,7 +176,7 @@ int main(void)
     else
     {
       printf("\r\n[burn] 실패. 모듈을 옮기지 마세요.\r\n");
-      printf("배선(TXD->PA10 / RXD->PA9 / M0->PB4 / M1->PB5 / 3V3 / GND) 확인 후 재시도.\r\n");
+      printf("배선(모듈TXD->PA10 / 모듈RXD->PA9 / M0->PC7 / M1->PB6 / AUX->PA7 / 3V3 / GND) 확인 후 재시도.\r\n");
     }
 
     /* 센서 동작으로 넘어가지 않는다. LED 로 결과를 표시하며 정지:
@@ -161,7 +190,7 @@ int main(void)
 #endif
 
 #if SENSOR_TX_LORA
-  /* USART1(PA9/PA10)과 M0/M1(PB4/PB5) 초기화를 드라이버가 직접 하므로
+  /* USART1(PA9/PA10)과 M0/M1/AUX(PC7/PB6/PA7) 초기화를 드라이버가 직접 하므로
    * .ioc 를 건드리지 않는다 -- CubeMX 재생성에도 안전하다.
    * 채널/출력/LBT 는 C0 명령으로 모듈에 영구 저장되어 있지만, 다른 모듈로
    * 교체했을 때를 대비해 부팅할 때마다 한 번 더 맞춰준다.
@@ -213,6 +242,10 @@ int main(void)
   /* adcBufReadySemHandle must exist before conversions can start firing the callback */
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
+  /* AlertCommand_Init() (freertos.c, RTOS_TIMERS above) already created the
+   * semaphore/timers a received line needs, so it's safe to start taking
+   * bytes now. */
+  AlertCommand_StartReceive();
   /* USER CODE END RTOS_PERIPH_START */
 
   /* Start scheduler */

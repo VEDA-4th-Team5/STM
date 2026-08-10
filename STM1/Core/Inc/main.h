@@ -61,19 +61,19 @@ void Error_Handler(void);
 #define B1_GPIO_Port GPIOC
 #define FLAME_A0_Pin GPIO_PIN_0
 #define FLAME_A0_GPIO_Port GPIOC
-#define HALL1_D0_Pin GPIO_PIN_0
-#define HALL1_D0_GPIO_Port GPIOA
-#define HALL2_D0_Pin GPIO_PIN_1
-#define HALL2_D0_GPIO_Port GPIOA
 #define USART_TX_Pin GPIO_PIN_2
 #define USART_TX_GPIO_Port GPIOA
 #define USART_RX_Pin GPIO_PIN_3
 #define USART_RX_GPIO_Port GPIOA
-#define HALL3_D0_Pin GPIO_PIN_4
-#define HALL3_D0_GPIO_Port GPIOA
 #define LD2_Pin GPIO_PIN_5
 #define LD2_GPIO_Port GPIOA
-#define HALL4_D0_Pin GPIO_PIN_0
+#define HALL1_D0_Pin GPIO_PIN_8
+#define HALL1_D0_GPIO_Port GPIOA
+#define HALL2_D0_Pin GPIO_PIN_10
+#define HALL2_D0_GPIO_Port GPIOB
+#define HALL3_D0_Pin GPIO_PIN_4
+#define HALL3_D0_GPIO_Port GPIOB
+#define HALL4_D0_Pin GPIO_PIN_5
 #define HALL4_D0_GPIO_Port GPIOB
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
@@ -81,6 +81,14 @@ void Error_Handler(void);
 #define TCK_GPIO_Port GPIOA
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
+#define PLATE_LED1_Pin GPIO_PIN_0
+#define PLATE_LED1_GPIO_Port GPIOA
+#define PLATE_LED2_Pin GPIO_PIN_1
+#define PLATE_LED2_GPIO_Port GPIOA
+#define PLATE_LED3_Pin GPIO_PIN_4
+#define PLATE_LED3_GPIO_Port GPIOA
+#define PLATE_LED4_Pin GPIO_PIN_0
+#define PLATE_LED4_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
