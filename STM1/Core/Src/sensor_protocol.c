@@ -1,15 +1,49 @@
 /* Formats sensor events as the plain-text lines the Raspberry Pi's parser
- * already expects (see docs/STM1_pipeline_test_2026-07-21.md). No CRC/binary
- * framing here on purpose - nothing on the receiving end consumes it. */
+ * already expects (see docs/STM1_pipeline_test_2026-07-21.md).
+ *
+ * 전송 경로는 sensor_protocol.h 의 SENSOR_TX_UART / SENSOR_TX_LORA 로 고른다.
+ * 문자열 생성은 여기 한 곳에만 있고 실제 송신은 emit_line() 이 분기하므로,
+ * 무선으로 바꿔도 태스크 로직(freertos.c)은 건드릴 필요가 없다.
+ * README 에 적어둔 "LoRa 전송으로 전환 시 이 함수 내부만 바꾸면 되도록
+ * 분리해둠" 이 실제로 여기서 쓰인다. */
 #include "sensor_protocol.h"
 #include "usart.h"
 #include <stdio.h>
 #include <string.h>
 
+/* SENSOR_TX_LORA 가 0이어도 헤더는 넣는다 -- 메시지 타입 상수와 bool 이
+ * 필요하고, 실제 코드는 --gc-sections 가 링크에서 걷어낸다. */
+#include "lora_frame.h"
+
 /* Each stream has its own counter so the Pi can detect dropped/out-of-order
  * packets; hall_sequence is shared across all 4 slots, not per-slot. */
 static uint32_t hall_sequence = 0;
 static uint32_t flame_sequence = 0;
+
+/**
+ * 완성된 한 줄을 선택된 경로로 내보낸다.
+ * @param seq       Pi 문서 권장대로 payload 안의 seq 와 같은 값을 프레임
+ *                  transport sequence 로도 쓴다.
+ * @param critical  LoRa duty 리미터를 우회할지 여부. 화재만 true.
+ */
+static void emit_line(const char *line, int len, uint8_t msg_type,
+                      uint32_t seq, bool critical)
+{
+  if ((line == NULL) || (len <= 0))
+  {
+    return;
+  }
+
+#if SENSOR_TX_UART
+  HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+#endif
+
+#if SENSOR_TX_LORA
+  (void)LoRaFrame_SendLine(msg_type, seq, line, critical);
+#else
+  (void)msg_type; (void)seq; (void)critical;
+#endif
+}
 
 void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied)
 {
@@ -19,7 +53,8 @@ void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied)
                       (unsigned int)(slot_index + 1),
                       occupied ? "OCCUPIED" : "VACANT",
                       (unsigned long)hall_sequence);
-  HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+  /* 홀은 1초마다 4개씩 나가므로 duty 리미터 대상 */
+  emit_line(line, len, LORA_MSG_SENSOR_EVENT, hall_sequence, false);
 }
 
 void SensorProtocol_SendFlameStatus(uint8_t verdict)
@@ -29,7 +64,8 @@ void SensorProtocol_SendFlameStatus(uint8_t verdict)
   int len = snprintf(line, sizeof(line), "FIRE:FLAME01:%s:%lu\r\n",
                       verdict ? "DETECTED" : "CLEARED",
                       (unsigned long)flame_sequence);
-  HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+  /* 화재는 엣지 트리거라 드물고 놓치면 안 되므로 리미터를 우회한다 */
+  emit_line(line, len, LORA_MSG_SENSOR_EVENT, flame_sequence, true);
 }
 
 void SensorProtocol_SendFlameEnergyDebug(float raw_avg, float baseline, float energy,

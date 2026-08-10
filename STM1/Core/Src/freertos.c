@@ -26,9 +26,12 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <stdbool.h>
 #include "arm_math.h"
 #include "sensor_queue.h"
 #include "sensor_protocol.h"
+#include "lora_e22.h"
+#include "lora_frame.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -162,11 +165,39 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+#if LORA_DEBUG_RX
+  /* RF 링크 진단용. LoRa 로 뭔가 들어오면 그대로 찍는다.
+   * 우리 송신이 상대에게 닿는지는 여기서 알 수 없지만, 반대 방향(상대 -> 우리)이
+   * 되는지는 알 수 있다. 한 방향이라도 통하면 안테나/RF 자체는 살아 있다는 뜻이라
+   * "전파가 아예 안 나간다"와 "송신부만 문제"를 가를 수 있다.
+   * 진단이 끝나면 LORA_DEBUG_RX 를 0 으로 되돌릴 것. */
+  static uint8_t lora_rx[64];
+  for (;;)
+  {
+    uint16_t n = LoRa_Recv(lora_rx, sizeof(lora_rx), 500);
+    if (n > 0)
+    {
+      printf("# [%8lu] LORA RX %u bytes:", (unsigned long)HAL_GetTick(), (unsigned)n);
+      for (uint16_t i = 0; i < n; i++)
+      {
+        printf(" %02X", lora_rx[i]);
+      }
+      printf("  |");
+      for (uint16_t i = 0; i < n; i++)
+      {
+        char c = (char)lora_rx[i];
+        printf("%c", (c >= 0x20 && c < 0x7F) ? c : '.');
+      }
+      printf("|\r\n");
+    }
+  }
+#else
   /* Infinite loop */
   for(;;)
   {
     osDelay(1000);
   }
+#endif
   /* USER CODE END StartDefaultTask */
 }
 
@@ -360,18 +391,32 @@ void StartTaskHallSensor(void *argument)
     HALL1_D0_Pin, HALL2_D0_Pin, HALL3_D0_Pin, HALL4_D0_Pin
   };
 
-  /* Hall reports on a fixed 1s cadence rather than only on change: the Pi
-   * side agreed on 1~2s polling and treats repeats as idempotent
-   * (DuplicateOccupiedIgnored / DuplicateVacantIgnored), so a steady heartbeat
-   * also doubles as a liveness signal. Debouncing still happens here at 50ms
-   * -- only the confirmed state is ever reported. (Fire is the opposite: it
-   * stays edge-triggered, see StartTaskFlameSensor.) */
-  const uint32_t REPORT_EVERY_N_POLLS = 1000 / POLL_PERIOD_MS; /* 20 * 50ms = 1s */
+  /* 보고 정책: 변화 즉시 + 10초 주기 전체 갱신.
+   *
+   * 원래는 1초마다 4채널을 전부 보냈다. 유선 UART 시절에는 문제가 없었지만
+   * LoRa 로 넘어오면서 duty cycle 한도에 정면으로 걸린다.
+   *
+   *   초당 4프레임 x 60초 = 240프레임, 프레임당 공중 점유 약 13ms
+   *   -> 60초에 3120ms. 10dBm 등급 예산은 1200ms(2%). 약 2.6배 초과.
+   *
+   * 그래서 발생 빈도 자체를 줄인다. 상태가 바뀐 슬롯만 즉시 보내고,
+   * 변화가 없어도 10초마다 4채널을 갱신해 liveness 를 유지한다.
+   *
+   *   정상 상태: 4프레임 / 10초 = 60초에 24프레임 x 13ms = 312ms  (예산 내)
+   *
+   * Pi 규격은 그대로다. 같은 SENSOR: 라인, 같은 메시지 타입이고 Pi 는 중복을
+   * idempotent 하게 처리하므로(DuplicateOccupiedIgnored) 주기만 느려진 것이다.
+   * 오히려 변화 감지는 최대 1초 지연에서 디바운스 250ms 로 빨라진다. */
+  const uint32_t REFRESH_EVERY_N_POLLS = 10000 / POLL_PERIOD_MS; /* 200 * 50ms = 10s */
   uint32_t poll_tick = 0;
 
   uint8_t debounced_state[4] = {0};   /* last confirmed state, sent to Pi */
   uint8_t candidate_state[4] = {0};   /* raw reading being debounced */
   uint32_t stable_count[4] = {0};     /* consecutive reads matching candidate_state */
+
+  /* 마지막으로 실제 보낸 값. 첫 주기 갱신 전까지는 미보고 상태로 둔다. */
+  uint8_t reported_state[4] = {0};
+  uint8_t reported_known[4] = {0};
 
   for (;;)
   {
@@ -403,21 +448,33 @@ void StartTaskHallSensor(void *argument)
       }
     }
 
-    /* Report all four slots together once per second. */
-    if (++poll_tick >= REPORT_EVERY_N_POLLS)
+    /* 주기 갱신인가? 그렇다면 4채널 전부, 아니면 바뀐 것만. */
+    bool refresh = (++poll_tick >= REFRESH_EVERY_N_POLLS);
+    if (refresh)
     {
       poll_tick = 0;
+    }
 
-      for (uint8_t ch = 0; ch < 4; ch++)
+    for (uint8_t ch = 0; ch < 4; ch++)
+    {
+      bool changed = (!reported_known[ch]) ||
+                     (debounced_state[ch] != reported_state[ch]);
+
+      if (!refresh && !changed)
       {
-        SensorEvent_t evt = {
-          .type = EVT_HALL,
-          .slot = ch,
-          .state = debounced_state[ch],
-          .energy = 0.0f
-        };
-        osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+        continue;
       }
+
+      SensorEvent_t evt = {
+        .type = EVT_HALL,
+        .slot = ch,
+        .state = debounced_state[ch],
+        .energy = 0.0f
+      };
+      osMessageQueuePut(sensorEventQueueHandle, &evt, 0, 0);
+
+      reported_state[ch] = debounced_state[ch];
+      reported_known[ch] = 1;
     }
 
     osDelay(POLL_PERIOD_MS);

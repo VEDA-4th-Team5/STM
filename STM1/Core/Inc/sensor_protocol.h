@@ -20,6 +20,21 @@
  * no debouncing of its own (contract: debounce is STM32's job).
  */
 
+/* 전송 경로 선택 (EVDA-46).
+ *   SENSOR_TX_UART : USART2 로 문자열을 그대로 보낸다. 지금까지 검증된 경로.
+ *   SENSOR_TX_LORA : 같은 문자열을 Pi 규격 LoRa binary frame 에 실어 보낸다.
+ *                    규격은 Pi_Server docs/UART_LORA_PROTOCOL.md, 구현은
+ *                    lora_frame.c 참고.
+ * 둘 다 1로 두면 같은 이벤트가 유선·무선 양쪽으로 나가므로 A/B 비교가 된다.
+ * LoRa 를 켜려면 main.c 에서 LoRa_Init() 이 먼저 호출되어야 한다.
+ *
+ * !! LoRa 를 켜기 전에 읽을 것: 홀센서는 1초마다 4채널을 전부 보낸다.
+ * 그대로 무선으로 흘리면 전파법 duty cycle 한도를 크게 넘는다. lora_frame.c
+ * 의 리미터가 초과분을 버리므로 위법 송신은 막히지만, 그만큼 홀 상태가
+ * 유실된다. 무선 전환 시 전송 주기 정책을 다시 정해야 한다. */
+#define SENSOR_TX_UART 1
+#define SENSOR_TX_LORA 1
+
 /* 1 = human-readable ANSI dashboard on UART for watching in PuTTY (fire/
  * occupied highlighted, screen redraws in place). 0 = raw SENSOR:/FIRE:
  * lines the Raspberry Pi parser expects. These are mutually exclusive on
