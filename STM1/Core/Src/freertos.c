@@ -30,6 +30,8 @@
 #include "sensor_queue.h"
 #include "sensor_protocol.h"
 #include "alert_command.h"
+#include "lora_e22.h"
+#include "lora_frame.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -237,11 +239,40 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+#if LORA_DEBUG_RX
+  /* LoRa 하행(Pi -> STM1) 확인용. 들어온 바이트를 그대로 USART2 에 찍는다.
+   * Pi 링크가 LoRa 로 옮겨가면서 USART2 는 콘솔 전용이 됐으므로 프로토콜을
+   * 오염시키지 않는다.
+   *
+   * !! 이건 진단용이지 하행 수신 구현이 아니다. LoRa_Recv() 는 블로킹 폴링이라
+   *    폴링 사이에 도착한 바이트가 버려지고, yield 도 하지 않아 CPU 를 계속
+   *    태운다. 실제로 ALERT 명령을 LoRa 로 받게 되면 인터럽트/DMA 수신으로
+   *    바꾸고 이 블록은 지울 것. (지금 하행 명령은 alert_command.c 가 USART2
+   *    인터럽트로 받는다 -- EVDA-194) */
+  static uint8_t lora_rx[64];
+  for (;;)
+  {
+    uint16_t n = LoRa_Recv(lora_rx, sizeof(lora_rx), 500);
+    if (n > 0)
+    {
+      printf("# [%8lu] LORA RX %u bytes:", (unsigned long)HAL_GetTick(), (unsigned)n);
+      for (uint16_t i = 0; i < n; i++) printf(" %02X", lora_rx[i]);
+      printf("  |");
+      for (uint16_t i = 0; i < n; i++)
+      {
+        char c = (char)lora_rx[i];
+        printf("%c", (c >= 0x20 && c < 0x7F) ? c : '.');
+      }
+      printf("|\r\n");
+    }
+  }
+#else
   /* Infinite loop */
   for(;;)
   {
     osDelay(1000);
   }
+#endif
   /* USER CODE END StartDefaultTask */
 }
 

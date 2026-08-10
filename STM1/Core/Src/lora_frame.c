@@ -1,0 +1,228 @@
+/**
+  ******************************************************************************
+  * @file    lora_frame.c
+  * @brief   Pi_Server LoRa binary frame 인코더 구현. 규격은 lora_frame.h 참고.
+  ******************************************************************************
+  */
+
+#include "lora_frame.h"
+#include "lora_e22.h"
+#include <string.h>
+#include <stdio.h>
+
+static uint32_t lora_dropped_frames = 0;
+static uint8_t  lora_tx_buf[LORA_FRAME_MAX_LEN];
+
+/* duty cycle 예산: 60초 창에 쓴 공중 점유 시간을 누적한다. 창이 지나면 리셋. */
+static uint32_t lora_window_start_tick = 0;
+static uint32_t lora_airtime_used_ms   = 0;
+
+uint32_t LoRaFrame_EstimateAirtimeMs(uint16_t frame_len)
+{
+  /* payload 시간 + 고정 오버헤드(preamble/헤더). 올림으로 안전하게. */
+  uint32_t bits = (uint32_t)frame_len * 8u;
+  uint32_t ms   = (bits * 1000u + (LORA_AIRTIME_BPS - 1u)) / LORA_AIRTIME_BPS;
+  return ms + LORA_AIRTIME_OVERHEAD_MS;
+}
+
+uint32_t LoRaFrame_GetAirtimeUsedMs(void)
+{
+  return lora_airtime_used_ms;
+}
+
+/**
+ * 이 프레임을 지금 보내도 duty 한도 안인지 본다.
+ * 통과시키면 예산을 차감한다.
+ */
+static bool duty_budget_take(uint32_t airtime_ms)
+{
+  uint32_t now   = HAL_GetTick();
+  uint32_t limit = (LORA_DUTY_BUDGET_MS * LORA_DUTY_SAFETY_PCT) / 100u;
+
+  /* 창이 지났으면 새 창을 연다. HAL_GetTick() 랩어라운드도 뺄셈이라 안전. */
+  if ((lora_window_start_tick == 0u) ||
+      ((now - lora_window_start_tick) >= LORA_DUTY_WINDOW_MS))
+  {
+    lora_window_start_tick = now;
+    lora_airtime_used_ms   = 0;
+  }
+
+  if ((lora_airtime_used_ms + airtime_ms) > limit)
+  {
+    return false;
+  }
+
+  lora_airtime_used_ms += airtime_ms;
+  return true;
+}
+
+/* CRC-16/CCITT-FALSE. 테이블 없이 비트 단위로 돌린다 -- 프레임이 40 byte
+ * 남짓이라 320회 반복이고, 1초에 몇 번 나가지도 않아 테이블을 둘 이유가 없다. */
+uint16_t LoRaFrame_Crc16(const uint8_t *data, uint16_t len)
+{
+  uint16_t crc = 0xFFFFu;
+
+  if (data == NULL)
+  {
+    return crc;
+  }
+
+  for (uint16_t i = 0; i < len; i++)
+  {
+    crc ^= (uint16_t)data[i] << 8;
+    for (uint8_t bit = 0; bit < 8; bit++)
+    {
+      if (crc & 0x8000u)
+      {
+        crc = (uint16_t)((crc << 1) ^ 0x1021u);
+      }
+      else
+      {
+        crc = (uint16_t)(crc << 1);
+      }
+    }
+  }
+
+  return crc;
+}
+
+uint16_t LoRaFrame_Encode(uint8_t *out, uint16_t out_size,
+                          uint8_t msg_type, uint32_t seq,
+                          const uint8_t *payload, uint16_t payload_len)
+{
+  if ((out == NULL) || (payload_len > LORA_FRAME_MAX_PAYLOAD))
+  {
+    return 0;
+  }
+  if ((payload == NULL) && (payload_len > 0))
+  {
+    return 0;
+  }
+
+  uint16_t total = (uint16_t)(LORA_FRAME_OVERHEAD + payload_len);
+  if (out_size < total)
+  {
+    return 0;
+  }
+
+  out[0] = LORA_FRAME_SOF0;
+  out[1] = LORA_FRAME_SOF1;
+  out[2] = LORA_FRAME_VERSION;
+  out[3] = msg_type;
+
+  /* transport sequence, big-endian */
+  out[4] = (uint8_t)((seq >> 24) & 0xFFu);
+  out[5] = (uint8_t)((seq >> 16) & 0xFFu);
+  out[6] = (uint8_t)((seq >>  8) & 0xFFu);
+  out[7] = (uint8_t)( seq        & 0xFFu);
+
+  /* payload length, big-endian */
+  out[8] = (uint8_t)((payload_len >> 8) & 0xFFu);
+  out[9] = (uint8_t)( payload_len       & 0xFFu);
+
+  if (payload_len > 0)
+  {
+    memcpy(&out[LORA_FRAME_HEADER_LEN], payload, payload_len);
+  }
+
+  /* CRC 범위는 Version(offset 2)부터 payload 끝까지 -- SOF 2 byte는 제외 */
+  uint16_t crc = LoRaFrame_Crc16(&out[2],
+                                 (uint16_t)(LORA_FRAME_HEADER_LEN - 2 + payload_len));
+
+  out[LORA_FRAME_HEADER_LEN + payload_len]     = (uint8_t)((crc >> 8) & 0xFFu);
+  out[LORA_FRAME_HEADER_LEN + payload_len + 1] = (uint8_t)( crc       & 0xFFu);
+
+  return total;
+}
+
+HAL_StatusTypeDef LoRaFrame_SendLine(uint8_t msg_type, uint32_t seq,
+                                     const char *line, bool critical)
+{
+  if (line == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  /* 끝의 CR/LF 제거. UART 경로는 CRLF가 필요하지만 프레임엔 길이 필드가
+   * 있어서 불필요하고, 공중 점유만 늘린다. */
+  size_t len = strlen(line);
+  while ((len > 0) && ((line[len - 1] == '\r') || (line[len - 1] == '\n')))
+  {
+    len--;
+  }
+  if (len > LORA_FRAME_MAX_PAYLOAD)
+  {
+    return HAL_ERROR;
+  }
+
+  /* 인코딩은 무조건 먼저 한다. 송신이 막히더라도 어떤 바이트가 나갈 뻔했는지
+   * 보여야 브링업 때 프레임 포맷을 대조할 수 있다. */
+  uint16_t total = LoRaFrame_Encode(lora_tx_buf, sizeof(lora_tx_buf),
+                                    msg_type, seq,
+                                    (const uint8_t *)line, (uint16_t)len);
+  if (total == 0u)
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_StatusTypeDef st;
+  const char *why;
+  uint32_t airtime = LoRaFrame_EstimateAirtimeMs(total);
+
+  if (!LoRa_IsConfigured())
+  {
+    /* 전파법 인터록. 설정이 확인되지 않은 모듈은 공장 기본값(채널 2 = RFID
+     * 리더 전용, 22 dBm)일 수 있으므로 송신 자체를 막는다. 화재도 예외 없다 --
+     * 위법 송신을 하느니 안 보내는 게 맞다. */
+    st  = HAL_ERROR;
+    why = "NOCFG";
+  }
+  else if (!duty_budget_take(airtime))
+  {
+    /* duty cycle 예산 소진. critical 이라도 예산은 못 넘긴다 -- 한도를 넘긴
+     * 송신은 화재 경보라도 위법이기 때문이다. 대신 예산 자체가 넉넉해서
+     * (60초에 960ms) 정상 트래픽으로는 거의 닿지 않는다. 여기 걸린다면
+     * 송신 주기 정책이 잘못된 것이므로 drop 카운터를 볼 것. */
+    lora_dropped_frames++;
+    st  = HAL_BUSY;
+    why = "DROP ";
+  }
+  else
+  {
+    st = LoRa_Send(lora_tx_buf, total);
+    if (st == HAL_OK)
+    {
+      why = "OK   ";
+    }
+    else
+    {
+      /* 실제로 안 나갔으니 예산을 돌려준다. */
+      if (lora_airtime_used_ms >= airtime) lora_airtime_used_ms -= airtime;
+      why = "TXERR";
+    }
+  }
+
+  (void)critical;   /* 예산제로 바뀌면서 우회 경로가 없어졌다 */
+
+#if LORA_DEBUG_HEX
+  /* 어느 경로로 갔든 항상 찍는다 -- 안 나가는 이유를 봐야 진단이 된다. */
+  printf("# LORA %s %uB air=%lums/%lums drop=%lu:", why, (unsigned)total,
+         (unsigned long)lora_airtime_used_ms,
+         (unsigned long)((LORA_DUTY_BUDGET_MS * LORA_DUTY_SAFETY_PCT) / 100u),
+         (unsigned long)lora_dropped_frames);
+  for (uint16_t i = 0; i < total; i++)
+  {
+    printf(" %02X", lora_tx_buf[i]);
+  }
+  printf("\r\n");
+#else
+  (void)why;
+#endif
+
+  return st;
+}
+
+uint32_t LoRaFrame_GetDroppedCount(void)
+{
+  return lora_dropped_frames;
+}
