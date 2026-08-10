@@ -86,6 +86,100 @@ Pi 파서(`SensorProtocolParser`)가 기대하는 형식은 각각
 
 디바운스는 STM32가 책임지고 Pi는 재디바운스하지 않는다는 게 팀 계약(`references/contracts.md`).
 
+## LoRa 무선 전송 (EVDA-46)
+
+같은 센서 문자열을 UART 대신(또는 동시에) LoRa로 보낼 수 있다. 전송 경로는
+[`Core/Inc/sensor_protocol.h`](Core/Inc/sensor_protocol.h)의 두 플래그로 고른다.
+
+```c
+#define SENSOR_TX_UART 1   /* USART2 -> Pi 직결 (검증된 경로, 기본값) */
+#define SENSOR_TX_LORA 0   /* E22 LoRa 프레임 */
+```
+
+둘 다 1로 두면 같은 이벤트가 유선·무선 양쪽으로 나가서 A/B 비교가 된다. 문자열
+생성은 `sensor_protocol.c`의 한 곳에만 있고 실제 송신은 `emit_line()`이 분기하므로
+태스크 로직(`freertos.c`)은 건드릴 필요가 없다.
+
+### 하드웨어
+
+EBYTE **E22-900T22S(1B)** — E220이 **아니다**. M0/M1 인코딩과 레지스터 맵이 다르다
+(E220 기준 `M1=1,M0=1`은 E22에서 딥슬립이라 아무 응답이 없다). 드라이버가 USART1과
+M0/M1 GPIO를 자체 초기화하므로 `.ioc` 변경이 필요 없다.
+
+| E22 | Nucleo | 실크 |
+|---|---|---|
+| VCC / GND | 3V3 / GND | — |
+| TXD | PA10 (USART1_RX) | D2 |
+| RXD | PA9 (USART1_TX) | D8 |
+| M0 | PB4 | D5 |
+| M1 | PB5 | D4 |
+| AUX | PA8 | D7 |
+
+TXD/RXD는 교차이며 위 표는 교차 반영된 상태다. 이 보드는 `D4=PB5`, `D5=PB4`로
+번호가 역전돼 있다.
+
+AUX는 모듈이 바쁠 때 LOW, idle이면 HIGH인 출력이다. 이걸 봐야 송신이 실제로
+끝났는지 알 수 있고, 그래야 연속 송신 때 앞 프레임이 아직 공중에 있는 상태로
+다음 프레임을 밀어 넣는 일이 없어진다. 입력에 풀업을 걸어두므로 **선이 안 붙어
+있으면 항상 HIGH로 읽혀 예전의 고정 딜레이 동작으로 조용히 되돌아간다** — 배선이
+틀려도 퇴행은 없다. 실제 연결 여부는 송신 로그의 `aux=ok` / `aux=미배선?` 로 본다.
+
+### 프레임 포맷
+
+Pi_Server `docs/UART_LORA_PROTOCOL.md` 규격을 그대로 따른다. 새로 설계한 것이 아니라
+Pi에 이미 있는 `LoRaDriver` / `parking-link-tool`이 기대하는 형식이다. 구현은
+[`Core/Src/lora_frame.c`](Core/Src/lora_frame.c).
+
+```
+AA 55 | 01  | 01  | 00 00 00 01 | 00 18 | SENSOR:HALL01:OCCUPIED:1 | D3 F6
+SOF   | ver | typ | transport seq| len   | payload                  | CRC16
+```
+
+- 모든 다중 byte 정수는 big-endian
+- CRC16-CCITT (init `0xFFFF`, poly `0x1021`), 범위는 **version부터 payload 끝까지**
+- payload는 기존 센서 문자열 그대로, **CRLF는 붙이지 않는다**(길이 필드가 있으므로 불필요)
+- 오버헤드 12 byte. 센서 문자열 기준 총 36~40 byte로 E22 서브패킷 240 byte 한도 내
+- transport sequence는 payload 안의 seq와 같은 값을 쓴다(Pi 문서 권장)
+
+### 무선 설정과 전파법
+
+KC RF 시험성적서 원문(`E22-900T22S_1B-KC-RF보고`) 대조로 확정한 값이다.
+
+| 항목 | 값 | 근거 |
+|---|---|---|
+| 채널 | **30** (922.9 MHz) | `f = 916.9 + CH × 0.2`, 채널 20~32는 200 mW 허용 |
+| 출력 | **10 dBm** (10 mW) | 한도의 1/20. E22 최저 단계 |
+| LBT | **on** | 송신 전 5 ms 센싱, −65 dBm 임계 |
+| 에어레이트 | **62.5k** | 공중 점유가 2.4k의 약 1/15 |
+| UART | **115200** | Pi 기본값(`SENSOR_UART_BAUD`)과 일치 |
+| 전송 주기 | **10초** | duty 약 0.1% (한도 2%) |
+
+- **공장 기본값은 위법이다.** 채널 2(917.3MHz)는 RFID 리더 전용인데 기본 출력이
+  22 dBm(158 mW)이라 일반 데이터 링크 한도를 크게 넘는다. 반드시 재설정할 것
+- **에어레이트는 양쪽 노드가 같아야 한다.** 한쪽만 바꾸면 통신이 끊긴다.
+  UART baud는 서로 달라도 무방하다
+- **UART baud는 duty와 무관하다.** 공중 점유는 에어레이트로만 정해진다
+- Pi 쪽 모듈은 MCU가 없어 스스로 설정하지 못한다. 이 보드에 잠깐 물려
+  `persist=true`(C0)로 한 번 구워서 넘겨야 한다
+
+> ⚠️ **안테나**: KC 인증 지정 안테나는 Chengdu Ziisor `TX915-JK-11`(Bendable Rubber,
+> 917~923.5MHz **2.5 dBi**)이다. 현재는 재고 문제로 HELTEC 스틱 안테나(**3 dBi**)를
+> 쓰고 있어 EIRP가 인증값 대비 0.5 dB 높다. 그 외 기술기준(채널·출력·LBT·점유시간·
+> duty)은 모두 충족한다. 실제 배치 시 지정 안테나로 교체할 것.
+> KC 등록번호 `R-R-eEt-E22-900T22S1B`, 기기부호 USN1.
+
+### duty cycle 리미터
+
+⚠️ 홀센서는 1초마다 4채널을 전부 보낸다(EVDA-158). 그대로 무선으로 흘리면 duty가
+한도를 크게 넘으므로, `lora_frame.c`에 최소 송신 간격(`LORA_MIN_TX_INTERVAL_MS`,
+기본 10초) 리미터를 둔다.
+
+- **화재**는 엣지 트리거라 드물고 놓치면 안 되므로 리미터를 우회한다
+- **홀**은 리미터에 걸리며, 버려진 개수는 `LoRaFrame_GetDroppedCount()`로 확인한다
+
+위법 송신은 막히지만 그만큼 홀 상태가 유실된다. 무선으로 전환할 때 전송 주기
+정책을 Pi 팀과 다시 정해야 한다(EVDA-134가 1~2초 폴링을 전제하고 있음).
+
 ### PuTTY 디버그 UI 모드
 
 [`Core/Inc/sensor_protocol.h`](Core/Inc/sensor_protocol.h)의 `SENSOR_DEBUG_UI`를 `1`로
