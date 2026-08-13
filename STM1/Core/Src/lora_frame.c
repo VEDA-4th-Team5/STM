@@ -253,6 +253,11 @@ static void rx_discard(uint16_t n)
 uint16_t LoRaFrame_Poll(char *out, uint16_t out_size,
                         uint8_t *msg_type, uint32_t *seq)
 {
+  if (out == NULL || out_size == 0u)
+  {
+    return 0;
+  }
+
   uint8_t b;
 
   /* 링버퍼를 비우면서 조립 버퍼에 채운다. */
