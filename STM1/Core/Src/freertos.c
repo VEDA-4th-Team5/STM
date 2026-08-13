@@ -742,8 +742,7 @@ static void HallHeartbeatTimerCallback(void *argument)
       continue;
     }
 
-    hall_last_sent_tick[ch] = now;
-    hall_sent_once[ch] = 1;
+    /* Heartbeat should not affect cooldown timestamps (HallEmitIfAllowed). */
 
     SensorEvent_t evt = {
       .type = EVT_HALL,
