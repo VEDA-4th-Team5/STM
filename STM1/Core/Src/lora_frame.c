@@ -288,7 +288,13 @@ uint16_t LoRaFrame_Poll(char *out, uint16_t out_size,
     /* 헤더 타당성 검사. 여기서 거르지 않으면 쓰레기에서 우연히 나온 AA 55 로
      * 엉뚱한 길이를 읽어 한참을 기다리게 된다. */
     uint16_t plen = (uint16_t)((rx_asm[8] << 8) | rx_asm[9]);
-    bool sane = (rx_asm[2] == LORA_FRAME_VERSION) &&
+    /* 받을 때는 version 0x01/0x02 를 다 받는다.
+     *
+     * 보낼 때만 0x02 를 쓰고 받을 때는 넓게 받아야, STM 과 Pi 를 같은 순간에
+     * 배포하지 않아도 된다. Pi 의 LoRaDriver 는 지금 encode() 에서 0x01 을
+     * 찍으므로, 여기서 0x02 만 고집하면 하행이 통째로 막힌다.
+     * ALERT 명령 페이로드 문법은 v1.0/v1.1 사이에 바뀌지 않았으므로 안전하다. */
+    bool sane = (rx_asm[2] == 0x01u || rx_asm[2] == 0x02u) &&
                 (rx_asm[3] >= 0x01u && rx_asm[3] <= 0x03u) &&
                 (plen > 0u) && (plen <= LORA_FRAME_MAX_PAYLOAD);
     if (!sane)
