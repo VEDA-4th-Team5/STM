@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>   /* ALERT_DEBUG_LOG */
+#include "sensor_protocol.h"   /* SENSOR_HALL_COUNT / SENSOR_HALL_BASE */
 
 #define ALERT_LINE_MAX 48
 
@@ -81,7 +82,7 @@ static char pending_line_[ALERT_LINE_MAX];
 static void AlertCommand_FailsafeCallback(void *argument)
 {
   uint32_t slot = (uint32_t)(uintptr_t)argument;
-  if (slot >= 4U) return;
+  if (slot >= SENSOR_HALL_COUNT) return;
   if (led_on_[slot])
   {
     HAL_GPIO_WritePin(led_port_[slot], led_pin_[slot], GPIO_PIN_RESET);
@@ -90,7 +91,7 @@ static void AlertCommand_FailsafeCallback(void *argument)
 #if ALERT_MIRROR_LD2
     {
       uint8_t any = 0U;
-      for (int i = 0; i < 4; i++) any |= led_on_[i];
+      for (unsigned i = 0; i < SENSOR_HALL_COUNT; i++) any |= led_on_[i];
       HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin,
                         any ? GPIO_PIN_SET : GPIO_PIN_RESET);
     }
@@ -101,7 +102,7 @@ static void AlertCommand_FailsafeCallback(void *argument)
 void AlertCommand_Init(void)
 {
   line_ready_sem_ = osSemaphoreNew(1, 0, &line_ready_sem_attr_);
-  for (uint32_t slot = 0U; slot < 4U; slot++)
+  for (uint32_t slot = 0U; slot < SENSOR_HALL_COUNT; slot++)
   {
     failsafe_timer_[slot] = osTimerNew(AlertCommand_FailsafeCallback,
                                        osTimerOnce, (void *)(uintptr_t)slot,
@@ -174,8 +175,14 @@ static int MatchHallSlot(const char *id, size_t id_len)
   if (strncmp(id, "HALL", 4) != 0) return -1;
   if (id[4] < '0' || id[4] > '9' || id[5] < '0' || id[5] > '9') return -1;
   int n = (id[4] - '0') * 10 + (id[5] - '0');
-  if (n < 1 || n > 4) return -1;
-  return n - 1;
+
+  /* 센서 번호는 노드를 가로질러 전역 고유하다(STM1=01,02 / STM2=03,04).
+   * 이 보드 담당 범위가 아니면 무시한다 -- 같은 채널을 두 노드가 듣고 있어서
+   * 상대 노드로 가는 명령도 여기까지 도달한다. 그때 슬롯 번호를 로컬
+   * 인덱스로 잘못 접으면 엉뚱한 LED 가 켜진다. */
+  int local = n - (int)SENSOR_HALL_BASE;
+  if (local < 0 || local >= (int)SENSOR_HALL_COUNT) return -1;
+  return local;
 }
 
 /* Parses "ALERT:<sensorId>:LED:<ON|OFF>[:<anything>]". Anything after the
@@ -268,7 +275,7 @@ void AlertCommand_Task(void)
 #if ALERT_MIRROR_LD2
     {
       uint8_t any = 0U;
-      for (int i = 0; i < 4; i++) any |= led_on_[i];
+      for (unsigned i = 0; i < SENSOR_HALL_COUNT; i++) any |= led_on_[i];
       HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin,
                         any ? GPIO_PIN_SET : GPIO_PIN_RESET);
     }

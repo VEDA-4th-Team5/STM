@@ -52,7 +52,7 @@ void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied)
   node_sequence++;
   int len = snprintf(line, sizeof(line), "SENSOR:%s:HALL%02u:%s:%lu\r\n",
                       SENSOR_NODE_ID,
-                      (unsigned int)(slot_index + 1),
+                      SENSOR_HALL_ID(slot_index),
                       occupied ? "OCCUPIED" : "VACANT",
                       (unsigned long)node_sequence);
   /* 홀은 채터링이 나면 양이 늘 수 있으므로 duty 리미터 대상으로 둔다.

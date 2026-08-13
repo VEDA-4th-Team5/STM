@@ -69,8 +69,29 @@
  * integration. */
 #define FLAME_DEBUG_ENERGY 0
 
-/* 이 보드의 노드 이름. STM2 는 자기 펌웨어에서 "STM2" 로 둔다. */
-#define SENSOR_NODE_ID "STM1"
+/* ==========================================================================
+ * 보드 구성 (STM1 / STM2 가 이 블록만 다르다)
+ * ==========================================================================
+ *
+ *   STM1 : 홀 2 + LED 2 + 화재 1
+ *   STM2 : 홀 2 + LED 2
+ *
+ * 센서 ID 는 노드를 가로질러 전역 고유하게 매긴다.
+ *   STM1 -> HALL01, HALL02
+ *   STM2 -> HALL03, HALL04
+ *
+ * 노드 이름으로 구분하는 방식(양쪽 다 HALL01/02)도 가능하지만 그러지 않았다.
+ * Pi 의 config/parking_slots.json 이 이미 HALL01~04 를 전역 고유 키로 쓰고
+ * 있어서, 전역 고유로 두면 Pi 쪽 매핑을 손대지 않아도 된다. 노드 ID 는
+ * 링크 진단·재부팅 감지·하행 라우팅에 쓰인다.
+ */
+#define SENSOR_NODE_ID     "STM1"   /* STM2 펌웨어에서는 "STM2" */
+#define SENSOR_HALL_COUNT  2u       /* 이 보드에 달린 홀센서 개수 */
+#define SENSOR_HALL_BASE   1u       /* 첫 센서의 번호. STM2 는 3 -> HALL03 */
+#define SENSOR_HAS_FLAME   1        /* STM2 는 0 */
+
+/* 슬롯 인덱스(0-based) -> 전선에 나가는 센서 번호 */
+#define SENSOR_HALL_ID(idx)  ((unsigned)(SENSOR_HALL_BASE + (idx)))
 
 /*
  * 홀 채널별 최소 재전송 간격(ms).

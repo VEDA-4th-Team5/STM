@@ -83,13 +83,13 @@ const osSemaphoreAttr_t hallEdgeSem_attributes = {
 /* Hall debounce state, kept at file scope (was local to
  * StartTaskHallSensor) so the confirmed value and the last-reported value
  * can be compared across wakes. */
-static uint8_t hall_debounced_state[4] = {0};
-static uint8_t hall_candidate_state[4] = {0};
-static uint32_t hall_stable_count[4] = {0};
+static uint8_t hall_debounced_state[SENSOR_HALL_COUNT] = {0};
+static uint8_t hall_candidate_state[SENSOR_HALL_COUNT] = {0};
+static uint32_t hall_stable_count[SENSOR_HALL_COUNT] = {0};
 /* Last state actually put on the wire per slot -- lets TaskHallSensor emit
  * only on a confirmed change instead of a fixed cadence, same as
  * TaskFlameSensor's last_verdict. */
-static uint8_t hall_last_reported_state[4] = {0};
+static uint8_t hall_last_reported_state[SENSOR_HALL_COUNT] = {0};
 
 /* 채널별 쿨다운 상태 (SENSOR_HALL_COOLDOWN_MS).
  *
@@ -100,9 +100,9 @@ static uint8_t hall_last_reported_state[4] = {0};
  *
  * 이게 없으면 채터링 시 duty 리미터가 프레임을 버리는데, 버려진 게 상태
  * 변화면 수신측은 다음 하트비트(30초)까지 틀린 상태를 들고 있게 된다. */
-static uint32_t hall_last_sent_tick[4] = {0};
-static uint8_t  hall_sent_once[4] = {0};
-static uint8_t  hall_pending[4] = {0};
+static uint32_t hall_last_sent_tick[SENSOR_HALL_COUNT] = {0};
+static uint8_t  hall_sent_once[SENSOR_HALL_COUNT] = {0};
+static uint8_t  hall_pending[SENSOR_HALL_COUNT] = {0};
 
 /* Fires every 30s regardless of GPIO activity: resends whatever
  * hall_debounced_state currently holds, purely as a liveness signal. Edge
@@ -219,10 +219,12 @@ void MX_FREERTOS_Init(void) {
   hallHeartbeatTimerHandle = osTimerNew(HallHeartbeatTimerCallback, osTimerPeriodic, NULL, &hallHeartbeatTimer_attributes);
   osTimerStart(hallHeartbeatTimerHandle, 30000);
 
+#if SENSOR_HAS_FLAME
   flameHeartbeatTimerHandle = osTimerNew(FlameHeartbeatTimerCallback, osTimerPeriodic, NULL, &flameHeartbeatTimer_attributes);
   /* 5초 주기로 돌지만 CLEARED 상태에서는 6번에 한 번(=30초)만 실제로 보낸다.
    * DETECTED 인 동안에만 5초 간격 텔레메트리가 된다 -- 콜백 주석 참고. */
   osTimerStart(flameHeartbeatTimerHandle, SENSOR_FLAME_TELEMETRY_MS);
+#endif
 
   /* Creates the line-ready semaphore and the 4 per-LED failsafe one-shot
    * timers. Grouped here (not a separate RTOS_SEMAPHORES entry) because
@@ -243,7 +245,11 @@ void MX_FREERTOS_Init(void) {
    * function and restore these lines if they're missing. */
   /* Create the thread(s) */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+#if SENSOR_HAS_FLAME
+  /* 화재센서가 없는 보드(STM2)에서는 태스크를 아예 만들지 않는다. FFT 버퍼
+   * 때문에 스택이 2KB라, 안 쓰면서 잡아두면 힙만 축낸다. */
   TaskFlameSensorHandle = osThreadNew(StartTaskFlameSensor, NULL, &TaskFlameSensor_attributes);
+#endif
   TaskHallSensorHandle = osThreadNew(StartTaskHallSensor, NULL, &TaskHallSensor_attributes);
   TaskPacketTXHandle = osThreadNew(StartTaskPacketTX, NULL, &TaskPacketTX_attributes);
   TaskCommandRXHandle = osThreadNew(StartTaskCommandRX, NULL, &TaskCommandRX_attributes);
@@ -565,12 +571,16 @@ void StartTaskHallSensor(void *argument)
    * which the protocol layer maps to sensor 1~4. HALL1/2/3/4 are on
    * PA8/PB10/PB4/PB5 -- picked so no two share an EXTI line number, see
    * gpio.c. */
-  GPIO_TypeDef *const hall_port[4] = {
+  /* 보드에 실제로 달린 개수만 쓴다(SENSOR_HALL_COUNT). 배열에는 핀 4개를
+   * 그대로 두되 앞에서부터 잘라 쓰는 방식이라, 홀을 2개로 줄여도 배선은
+   * HALL1/HALL2 자리를 그대로 쓰면 된다. */
+  GPIO_TypeDef *const hall_port[] = {
     HALL1_D0_GPIO_Port, HALL2_D0_GPIO_Port, HALL3_D0_GPIO_Port, HALL4_D0_GPIO_Port
   };
-  const uint16_t hall_pin[4] = {
+  const uint16_t hall_pin[] = {
     HALL1_D0_Pin, HALL2_D0_Pin, HALL3_D0_Pin, HALL4_D0_Pin
   };
+  _Static_assert(SENSOR_HALL_COUNT <= 4, "핀 정의는 4개까지만 있다");
 
   /* This used to be a 50ms poll loop that scanned all 4 channels forever
    * and reported all 4 on a fixed 1s tick regardless of change. Now the 4
@@ -588,7 +598,7 @@ void StartTaskHallSensor(void *argument)
    * verdict_seeded boot window, just instantaneous here since there's no
    * ambient signal to average. Without this, a sensor already occupied at
    * boot would never be reported until its next physical transition. */
-  for (uint8_t ch = 0; ch < 4; ch++)
+  for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
   {
     uint8_t raw = (HAL_GPIO_ReadPin(hall_port[ch], hall_pin[ch]) == GPIO_PIN_RESET) ? 1 : 0;
     hall_candidate_state[ch] = raw;
@@ -607,7 +617,7 @@ void StartTaskHallSensor(void *argument)
      * 하트비트(30초)까지 묻히기 때문이다. 남은 쿨다운만큼만 기다렸다가
      * 깨어나 밀어낸다. */
     uint32_t wait = osWaitForever;
-    for (uint8_t ch = 0; ch < 4; ch++)
+    for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
     {
       if (!hall_pending[ch]) continue;
       uint32_t elapsed = osKernelGetTickCount() - hall_last_sent_tick[ch];
@@ -618,14 +628,14 @@ void StartTaskHallSensor(void *argument)
     osSemaphoreAcquire(hallEdgeSemHandle, wait);
 
     /* 엣지로 깨웠든 쿨다운 만료로 깨웠든, 밀린 것부터 처리한다. */
-    for (uint8_t ch = 0; ch < 4; ch++)
+    for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
     {
       if (hall_pending[ch]) HallEmitIfAllowed(ch);
     }
 
     for (uint32_t i = 0; i < CONFIRM_ITERATIONS; i++)
     {
-      for (uint8_t ch = 0; ch < 4; ch++)
+      for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
       {
         /* D0 is open-collector: idle (no magnet) floats HIGH via the pull-up,
          * and a magnet trips the comparator which sinks the line LOW. So LOW
@@ -718,7 +728,7 @@ static void HallHeartbeatTimerCallback(void *argument)
 
   uint32_t now = osKernelGetTickCount();
 
-  for (uint8_t ch = 0; ch < 4; ch++)
+  for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
   {
     /* 최근 30초 안에 이미 보낸 채널은 건너뛴다.
      *
