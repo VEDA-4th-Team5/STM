@@ -226,3 +226,111 @@ uint32_t LoRaFrame_GetDroppedCount(void)
 {
   return lora_dropped_frames;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 수신 디코더                                                                */
+/* -------------------------------------------------------------------------- */
+
+/* 링버퍼에서 꺼낸 바이트를 여기 쌓아 프레임 단위로 잘라낸다. 헤더가 다 와야
+ * 길이를 알 수 있으므로 부분 프레임을 들고 있을 곳이 필요하다. */
+static uint8_t  rx_asm[LORA_FRAME_MAX_LEN];
+static uint16_t rx_len = 0;
+static uint32_t lora_rx_crc_errors = 0;
+
+uint32_t LoRaFrame_GetRxCrcErrorCount(void)
+{
+  return lora_rx_crc_errors;
+}
+
+/* 앞에서 n 바이트를 버리고 나머지를 당긴다. 동기를 다시 잡을 때 쓴다. */
+static void rx_discard(uint16_t n)
+{
+  if (n >= rx_len) { rx_len = 0; return; }
+  memmove(rx_asm, &rx_asm[n], (size_t)(rx_len - n));
+  rx_len = (uint16_t)(rx_len - n);
+}
+
+uint16_t LoRaFrame_Poll(char *out, uint16_t out_size,
+                        uint8_t *msg_type, uint32_t *seq)
+{
+  if (out == NULL || out_size == 0u)
+  {
+    return 0;
+  }
+
+  uint8_t b;
+
+  /* 링버퍼를 비우면서 조립 버퍼에 채운다. */
+  while (LoRa_RingPop(&b))
+  {
+    if (rx_len < sizeof(rx_asm))
+    {
+      rx_asm[rx_len++] = b;
+    }
+    else
+    {
+      /* 조립 버퍼가 꽉 찼는데 프레임이 안 나왔다 = 동기를 잃었다.
+       * 통째로 버리는 대신 앞을 밀어 다음 SOF 를 찾을 여지를 남긴다. */
+      rx_discard(1);
+      rx_asm[rx_len++] = b;
+    }
+  }
+
+  for (;;)
+  {
+    /* SOF 찾기 */
+    uint16_t i = 0;
+    while ((i + 1u) < rx_len &&
+           !(rx_asm[i] == LORA_FRAME_SOF0 && rx_asm[i + 1u] == LORA_FRAME_SOF1))
+    {
+      i++;
+    }
+    if (i > 0) rx_discard(i);
+
+    if (rx_len < LORA_FRAME_HEADER_LEN) return 0;   /* 헤더가 아직 덜 왔다 */
+    if (!(rx_asm[0] == LORA_FRAME_SOF0 && rx_asm[1] == LORA_FRAME_SOF1)) return 0;
+
+    /* 헤더 타당성 검사. 여기서 거르지 않으면 쓰레기에서 우연히 나온 AA 55 로
+     * 엉뚱한 길이를 읽어 한참을 기다리게 된다. */
+    uint16_t plen = (uint16_t)((rx_asm[8] << 8) | rx_asm[9]);
+    /* 받을 때는 version 0x01/0x02 를 다 받는다.
+     *
+     * 보낼 때만 0x02 를 쓰고 받을 때는 넓게 받아야, STM 과 Pi 를 같은 순간에
+     * 배포하지 않아도 된다. Pi 의 LoRaDriver 는 지금 encode() 에서 0x01 을
+     * 찍으므로, 여기서 0x02 만 고집하면 하행이 통째로 막힌다.
+     * ALERT 명령 페이로드 문법은 v1.0/v1.1 사이에 바뀌지 않았으므로 안전하다. */
+    bool sane = (rx_asm[2] == 0x01u || rx_asm[2] == 0x02u) &&
+                (rx_asm[3] >= 0x01u && rx_asm[3] <= 0x03u) &&
+                (plen > 0u) && (plen <= LORA_FRAME_MAX_PAYLOAD);
+    if (!sane)
+    {
+      rx_discard(1);      /* 이 AA 55 는 가짜였다. 다음 것을 찾는다 */
+      continue;
+    }
+
+    uint16_t total = (uint16_t)(plen + LORA_FRAME_OVERHEAD);
+    if (rx_len < total) return 0;                   /* payload 가 아직 덜 왔다 */
+
+    uint16_t want = (uint16_t)((rx_asm[total - 2u] << 8) | rx_asm[total - 1u]);
+    uint16_t got  = LoRaFrame_Crc16(&rx_asm[2], (uint16_t)(total - 4u));
+
+    if (want != got)
+    {
+      lora_rx_crc_errors++;
+      rx_discard(2);      /* 이 프레임은 버리되, 뒤에 진짜가 있을 수 있다 */
+      continue;
+    }
+
+    uint16_t n = plen;
+    if (n > (uint16_t)(out_size - 1u)) n = (uint16_t)(out_size - 1u);
+    memcpy(out, &rx_asm[LORA_FRAME_HEADER_LEN], n);
+    out[n] = '\0';
+
+    if (msg_type) *msg_type = rx_asm[3];
+    if (seq) *seq = ((uint32_t)rx_asm[4] << 24) | ((uint32_t)rx_asm[5] << 16) |
+                    ((uint32_t)rx_asm[6] << 8)  | (uint32_t)rx_asm[7];
+
+    rx_discard(total);
+    return n;
+  }
+}

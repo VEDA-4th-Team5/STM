@@ -112,6 +112,33 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     AlertCommand_OnByteReceived();
   }
+  else if (huart->Instance == USART1)
+  {
+    /* LoRa 하행. 여기서는 링버퍼에 넣기만 하고, 프레임 조립과 CRC 검증은
+     * StartDefaultTask 가 태스크 문맥에서 한다 -- USART2 경로가 파싱을
+     * 태스크로 미루는 것과 같은 이유다. */
+    LoRa_OnByteReceived();
+  }
+}
+
+/* 수신 에러(주로 오버런/프레이밍)가 나면 HAL 은 수신을 중단하고 *재무장하지
+ * 않는다.* 그대로 두면 그 순간부터 하행이 조용히 죽는다 -- 로그도 안 남고
+ * 송신은 멀쩡해서 원인을 찾기 어렵다. 여기서 다시 걸어준다.
+ *
+ * 오버런은 인터럽트가 잠깐 지연되면(예: 송신 중 스케줄러 정지 구간) 실제로
+ * 발생한다. 이 콜백이 없으면 몇 시간 안에 반드시 겪는다. */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    AlertCommand_StartReceive();
+  }
+  else if (huart->Instance == USART1)
+  {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    LoRa_StartReceiveIT();
+  }
 }
 /* USER CODE END 0 */
 
@@ -189,6 +216,23 @@ int main(void)
   }
 #endif
 
+  /* 빌드 배너.
+   *
+   * 플래시가 실제로 새 빌드로 갈렸는지 로그만 보고는 알 수 없어서, 옛 펌웨어를
+   * 돌리며 "왜 새 기능이 안 보이지" 를 몇 번 반복했다. 부팅할 때마다 빌드
+   * 시각과 켜져 있는 기능을 찍어두면 그 혼선이 사라진다. */
+  printf("\r\n======================================================\r\n");
+  printf("# STM1  build %s %s\r\n", __DATE__, __TIME__);
+  printf("# payload v1.1 (frame ver 0x%02X) / node %s\r\n",
+         (unsigned)LORA_FRAME_VERSION, SENSOR_NODE_ID);
+  printf("# TX  uart=%d lora=%d   LoRa ch=%u pwr=10dBm lbt=%d\r\n",
+         SENSOR_TX_UART, SENSOR_TX_LORA,
+         (unsigned)LORA_CH_DATA_DEFAULT, LORA_LBT_ENABLE);
+  printf("# 홀 쿨다운 %lums / 화재 텔레메트리 %lums\r\n",
+         (unsigned long)SENSOR_HALL_COOLDOWN_MS,
+         (unsigned long)SENSOR_FLAME_TELEMETRY_MS);
+  printf("======================================================\r\n");
+
 #if SENSOR_TX_LORA
   /* USART1(PA9/PA10)과 M0/M1/AUX(PC7/PB6/PA7) 초기화를 드라이버가 직접 하므로
    * .ioc 를 건드리지 않는다 -- CubeMX 재생성에도 안전하다.
@@ -245,7 +289,25 @@ int main(void)
   /* AlertCommand_Init() (freertos.c, RTOS_TIMERS above) already created the
    * semaphore/timers a received line needs, so it's safe to start taking
    * bytes now. */
+  /* 태스크/큐/타이머가 전부 만들어진 뒤라야 힙 사용량이 의미가 있다.
+   * 배너(위 USER CODE 2)에서 찍으면 아직 할당이 한 번도 없어 heap_4 가
+   * 초기화되기 전이라 항상 0 이 나온다 -- 실제로 그걸로 한 번 오해했다. */
+  printf("# FreeRTOS 힙 여유 %u / %u B (태스크 생성 후)\r\n",
+         (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
+
   AlertCommand_StartReceive();
+
+#if SENSOR_TX_LORA
+  /* LoRa 인터럽트 수신 시작.
+   *
+   * 반드시 LoRa_ConfigureFull() 이 끝난 뒤여야 한다. 설정 모드는 블로킹
+   * 수신(HAL_UART_Receive)을 쓰는데, 인터럽트 수신이 먼저 걸려 있으면
+   * 같은 UART 를 두 방식이 다투게 되어 레지스터 응답을 놓친다.
+   *
+   * 이후로 STM1 은 항상 듣는 상태가 된다 -- Pi 가 언제 명령을 보내도
+   * 받는다. 조립/CRC 검증은 StartDefaultTask 가 태스크 문맥에서 한다. */
+  LoRa_StartReceiveIT();
+#endif
   /* USER CODE END RTOS_PERIPH_START */
 
   /* Start scheduler */

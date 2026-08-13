@@ -9,6 +9,8 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>   /* ALERT_DEBUG_LOG */
+#include "sensor_protocol.h"   /* SENSOR_HALL_COUNT / SENSOR_HALL_BASE */
 
 #define ALERT_LINE_MAX 48
 
@@ -19,6 +21,19 @@
  * section of Pi_Server/docs/UART_LORA_PROTOCOL.md, which currently assumes
  * this exact value. Keep the two in sync if this changes. */
 #define ALERT_LED_FAILSAFE_MS 5000U
+
+/* 1 = 수신한 명령의 수락/거부를 USART2 콘솔에 남긴다.
+ * Pi 링크가 LoRa 로 옮겨가면서 USART2 는 콘솔 전용이라 프로토콜을 오염시키지
+ * 않는다. 하행이 안 먹을 때 원인을 가르는 유일한 단서라 기본으로 켜둔다. */
+#define ALERT_DEBUG_LOG 1
+
+/* 1 = 번호판 LED 4개 중 하나라도 켜지면 보드 내장 LED(LD2, PA5)도 같이 켠다.
+ *
+ * 번호판 LED 는 PA0/PA1/PA4/PB0 에 외부로 다는 부품이라, 아직 안 달았거나
+ * 배선이 잘못돼 있으면 명령이 정상 처리돼도 눈에 보이는 변화가 없다.
+ * 그때 "명령이 안 먹은 것"과 "LED 가 없는 것"을 구분하려면 이 미러가 필요하다.
+ * 실배치 때는 0 으로 두면 된다. */
+#define ALERT_MIRROR_LD2 1
 
 /* Slot order matches sensor_protocol.c's HALL01..HALL04 numbering (n-1). */
 static GPIO_TypeDef *const led_port_[4] = {
@@ -67,18 +82,27 @@ static char pending_line_[ALERT_LINE_MAX];
 static void AlertCommand_FailsafeCallback(void *argument)
 {
   uint32_t slot = (uint32_t)(uintptr_t)argument;
-  if (slot >= 4U) return;
+  if (slot >= SENSOR_HALL_COUNT) return;
   if (led_on_[slot])
   {
     HAL_GPIO_WritePin(led_port_[slot], led_pin_[slot], GPIO_PIN_RESET);
     led_on_[slot] = 0U;
+
+#if ALERT_MIRROR_LD2
+    {
+      uint8_t any = 0U;
+      for (unsigned i = 0; i < SENSOR_HALL_COUNT; i++) any |= led_on_[i];
+      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin,
+                        any ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+#endif
   }
 }
 
 void AlertCommand_Init(void)
 {
   line_ready_sem_ = osSemaphoreNew(1, 0, &line_ready_sem_attr_);
-  for (uint32_t slot = 0U; slot < 4U; slot++)
+  for (uint32_t slot = 0U; slot < SENSOR_HALL_COUNT; slot++)
   {
     failsafe_timer_[slot] = osTimerNew(AlertCommand_FailsafeCallback,
                                        osTimerOnce, (void *)(uintptr_t)slot,
@@ -89,6 +113,26 @@ void AlertCommand_Init(void)
 void AlertCommand_StartReceive(void)
 {
   HAL_UART_Receive_IT(&huart2, &rx_byte_, 1);
+}
+
+void AlertCommand_SubmitLine(const char *line, uint16_t len)
+{
+  if (line == NULL) return;
+  if (len >= ALERT_LINE_MAX) len = ALERT_LINE_MAX - 1U;
+
+  /* pending_line_ 은 한 칸짜리라, 두 입력원(USART2 ISR / LoRa 태스크)이
+   * 동시에 쓰면 반쯤 섞인 줄이 나올 수 있다. 복사 구간만 짧게 막는다.
+   * 30바이트 남짓이라 인터럽트 지연은 마이크로초 단위다.
+   *
+   * !! 태스크가 소비하기 전에 다음 줄이 들어오면 앞의 것을 덮어쓴다.
+   *    명령이 드물어 실용상 문제는 없지만, 하행이 잦아지면 큐로 바꿔야 한다. */
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  memcpy(pending_line_, line, len);
+  pending_line_[len] = '\0';
+  __set_PRIMASK(primask);
+
+  osSemaphoreRelease(line_ready_sem_);
 }
 
 void AlertCommand_OnByteReceived(void)
@@ -104,9 +148,7 @@ void AlertCommand_OnByteReceived(void)
     {
       size_t len = line_len_;
       if (len > 0U && line_buf_[len - 1U] == '\r') len--;
-      memcpy(pending_line_, line_buf_, len);
-      pending_line_[len] = '\0';
-      osSemaphoreRelease(line_ready_sem_);
+      AlertCommand_SubmitLine(line_buf_, (uint16_t)len);
     }
     line_len_ = 0U;
     line_overflow_ = 0U;
@@ -133,8 +175,14 @@ static int MatchHallSlot(const char *id, size_t id_len)
   if (strncmp(id, "HALL", 4) != 0) return -1;
   if (id[4] < '0' || id[4] > '9' || id[5] < '0' || id[5] > '9') return -1;
   int n = (id[4] - '0') * 10 + (id[5] - '0');
-  if (n < 1 || n > 4) return -1;
-  return n - 1;
+
+  /* 센서 번호는 노드를 가로질러 전역 고유하다(STM1=01,02 / STM2=03,04).
+   * 이 보드 담당 범위가 아니면 무시한다 -- 같은 채널을 두 노드가 듣고 있어서
+   * 상대 노드로 가는 명령도 여기까지 도달한다. 그때 슬롯 번호를 로컬
+   * 인덱스로 잘못 접으면 엉뚱한 LED 가 켜진다. */
+  int local = n - (int)SENSOR_HALL_BASE;
+  if (local < 0 || local >= (int)SENSOR_HALL_COUNT) return -1;
+  return local;
 }
 
 /* Parses "ALERT:<sensorId>:LED:<ON|OFF>[:<anything>]". Anything after the
@@ -181,6 +229,26 @@ void AlertCommand_Task(void)
 
     uint8_t is_on = 0U;
     const int slot = ParseAlertLine(line, &is_on);
+
+#if ALERT_DEBUG_LOG
+    /* 명령이 어디서 끊기는지 로그 없이는 알 수 없다. LED 가 안 켜질 때
+     * "전파가 안 왔다 / 파싱이 실패했다 / GPIO 는 움직였는데 LED 가 안 달려
+     * 있다" 를 가르는 게 이 한 줄이다. */
+    if (slot < 0)
+    {
+      printf("# ALERT 거부: \"%s\"\r\n", line);
+    }
+    else
+    {
+      printf("# ALERT 수락: slot=%d(%s) %s -> %s\r\n",
+             slot + 1,
+             (slot == 0) ? "PA0" : (slot == 1) ? "PA1" :
+             (slot == 2) ? "PA4" : "PB0",
+             is_on ? "ON" : "OFF",
+             is_on ? "핀 HIGH" : "핀 LOW");
+    }
+#endif
+
     if (slot < 0) continue;
 
     if (is_on)
@@ -203,5 +271,14 @@ void AlertCommand_Task(void)
       osTimerStop(failsafe_timer_[slot]);
     }
     /* else: OFF while already off -- ignored per protocol. */
+
+#if ALERT_MIRROR_LD2
+    {
+      uint8_t any = 0U;
+      for (unsigned i = 0; i < SENSOR_HALL_COUNT; i++) any |= led_on_[i];
+      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin,
+                        any ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+#endif
   }
 }

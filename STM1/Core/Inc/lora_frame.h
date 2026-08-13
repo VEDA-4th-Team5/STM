@@ -43,7 +43,13 @@ extern "C" {
 
 #define LORA_FRAME_SOF0        0xAAu
 #define LORA_FRAME_SOF1        0x55u
-#define LORA_FRAME_VERSION     0x01u
+/* 0x01 = v1.0 페이로드 (노드 ID 없음, 스트림별 seq, energy 없음)
+ * 0x02 = v1.1 페이로드 (노드 ID 추가, 노드 단일 seq, 화재 energy 동봉)
+ *
+ * 버전 바이트를 올려두면 수신측이 구/신을 동시에 받을 수 있다. STM 과 Pi 를
+ * 같은 순간에 배포할 필요가 없어지고, 한쪽만 롤백해도 링크가 안 깨진다.
+ * 페이로드 의미가 바뀔 때마다 여기를 올릴 것. */
+#define LORA_FRAME_VERSION     0x02u
 
 #define LORA_FRAME_HEADER_LEN  10u   /* SOF..길이 필드까지 */
 #define LORA_FRAME_CRC_LEN      2u
@@ -157,6 +163,25 @@ uint32_t LoRaFrame_GetAirtimeUsedMs(void);
  * @brief  프레임 길이로부터 공중 점유 시간을 추정한다(ms).
  */
 uint32_t LoRaFrame_EstimateAirtimeMs(uint16_t frame_len);
+
+/**
+ * @brief  LoRa 수신 링버퍼를 소비해 완성된 프레임을 꺼낸다. 논블로킹.
+ *
+ * SOF(AA 55) 를 찾고 version/type/len 을 검사한 뒤 CRC 까지 맞아야 통과시킨다.
+ * 쓰레기 바이트에서 우연히 나온 AA 55 를 프레임으로 오인하지 않도록,
+ * 헤더가 말이 안 되면 1바이트만 버리고 다시 동기를 잡는다.
+ *
+ * @param  out       payload 를 받을 버퍼 (널종단해서 돌려준다)
+ * @param  out_size  버퍼 크기
+ * @param  msg_type  받은 프레임의 메시지 타입 (NULL 가능)
+ * @param  seq       받은 프레임의 transport sequence (NULL 가능)
+ * @retval payload 길이. 0 이면 아직 완성된 프레임이 없다.
+ */
+uint16_t LoRaFrame_Poll(char *out, uint16_t out_size,
+                        uint8_t *msg_type, uint32_t *seq);
+
+/** @brief CRC 불일치로 버린 프레임 수. 링크 품질 지표. */
+uint32_t LoRaFrame_GetRxCrcErrorCount(void);
 
 #ifdef __cplusplus
 }

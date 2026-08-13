@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "lora_e22.h"   /* hlora -- USART1_IRQHandler (파일 끝) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -259,5 +260,15 @@ void USART2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/**
+  * @brief LoRa 링크(USART1) 전역 인터럽트.
+  *
+  * USART1 은 .ioc 에 없다 -- LoRa 드라이버가 직접 초기화한다(CubeMX 재생성에
+  * 안전하도록). 그래서 이 핸들러도 CubeMX 가 만들어주지 않으므로 여기 USER
+  * CODE 영역에 둔다. NVIC 활성화는 LoRa_StartReceiveIT() 안에 있다.
+  */
+void USART1_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&hlora);
+}
 /* USER CODE END 1 */

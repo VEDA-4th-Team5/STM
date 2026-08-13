@@ -15,10 +15,11 @@
  * 필요하고, 실제 코드는 --gc-sections 가 링크에서 걷어낸다. */
 #include "lora_frame.h"
 
-/* Each stream has its own counter so the Pi can detect dropped/out-of-order
- * packets; hall_sequence is shared across all 4 slots, not per-slot. */
-static uint32_t hall_sequence = 0;
-static uint32_t flame_sequence = 0;
+/* v1.1: 노드 단일 카운터. 예전엔 홀/화재가 각각 셌는데, 수신측 시퀀스 가드가
+ * 단일 스트림으로 보고 있어서 홀 141 다음 화재 1 이 오면 역행으로 판정했다.
+ * 이제 프레임 transport seq 와 항상 같은 값이다.
+ * 재부팅하면 0 으로 돌아간다 -- 수신측은 이를 노드 재시작으로 해석해야 한다. */
+static uint32_t node_sequence = 0;
 
 /**
  * 완성된 한 줄을 선택된 경로로 내보낸다.
@@ -26,6 +27,27 @@ static uint32_t flame_sequence = 0;
  *                  transport sequence 로도 쓴다.
  * @param critical  LoRa duty 리미터를 우회할지 여부. 화재만 true.
  */
+/**
+ * snprintf 반환값을 그대로 쓰면 안 되기 때문에 한 곳에서 막는다.
+ *
+ * snprintf 는 버퍼가 모자라면 *잘린 길이* 가 아니라 *쓰였어야 할 길이* 를
+ * 돌려준다. 그 값을 emit_line() 에 넘기면 line[] 범위를 넘어 읽어서 송신하게
+ * 된다. 지금 페이로드가 40자 남짓이라 실제로 넘치진 않지만, 노드 이름이나
+ * 센서 이름이 길어지는 순간 조용히 터진다.
+ *
+ * 잘렸으면 0 을 돌려 아예 보내지 않는다. 반쪽 프레임은 CRC 는 맞는데 내용이
+ * 틀린 상태라, 수신측이 잘못된 값을 정상으로 받아들이게 된다. 안 보내는
+ * 편이 낫다 -- 홀은 다음 하트비트에, 화재는 다음 상태 변화에 다시 나간다.
+ *
+ * @return 실제로 버퍼에 들어간 길이. 잘렸거나 인코딩 오류면 0.
+ */
+static int safe_len(int printed, size_t bufsize)
+{
+  if (printed < 0) return 0;
+  if ((size_t)printed >= bufsize) return 0;
+  return printed;
+}
+
 static void emit_line(const char *line, int len, uint8_t msg_type,
                       uint32_t seq, bool critical)
 {
@@ -47,25 +69,35 @@ static void emit_line(const char *line, int len, uint8_t msg_type,
 
 void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied)
 {
-  char line[48];
-  hall_sequence++;
-  int len = snprintf(line, sizeof(line), "SENSOR:HALL%02u:%s:%lu\r\n",
-                      (unsigned int)(slot_index + 1),
+  char line[64];
+  node_sequence++;
+  int len = snprintf(line, sizeof(line), "SENSOR:%s:HALL%02u:%s:%lu\r\n",
+                      SENSOR_NODE_ID,
+                      SENSOR_HALL_ID(slot_index),
                       occupied ? "OCCUPIED" : "VACANT",
-                      (unsigned long)hall_sequence);
-  /* 홀은 1초마다 4개씩 나가므로 duty 리미터 대상 */
-  emit_line(line, len, LORA_MSG_SENSOR_EVENT, hall_sequence, false);
+                      (unsigned long)node_sequence);
+  len = safe_len(len, sizeof(line));
+  /* 홀은 채터링이 나면 양이 늘 수 있으므로 duty 리미터 대상으로 둔다.
+   * 다만 TaskHallSensor 의 채널별 쿨다운이 앞단에서 이미 양을 묶어주므로
+   * 정상 동작에서는 리미터에 걸릴 일이 없다. */
+  emit_line(line, len, LORA_MSG_SENSOR_EVENT, node_sequence, false);
 }
 
-void SensorProtocol_SendFlameStatus(uint8_t verdict)
+void SensorProtocol_SendFlameStatus(uint8_t verdict, float energy)
 {
-  char line[48];
-  flame_sequence++;
-  int len = snprintf(line, sizeof(line), "FIRE:FLAME01:%s:%lu\r\n",
+  char line[64];
+  node_sequence++;
+  /* energy 는 1~20Hz 대역 에너지. 실측 범위가 0~103 정도라 소수 둘째 자리면
+   * 충분하다. (-u _printf_float 가 링크 옵션에 있어 %f 가 동작한다) */
+  int len = snprintf(line, sizeof(line), "FIRE:%s:FLAME01:%s:%lu:%.2f\r\n",
+                      SENSOR_NODE_ID,
                       verdict ? "DETECTED" : "CLEARED",
-                      (unsigned long)flame_sequence);
-  /* 화재는 엣지 트리거라 드물고 놓치면 안 되므로 리미터를 우회한다 */
-  emit_line(line, len, LORA_MSG_SENSOR_EVENT, flame_sequence, true);
+                      (unsigned long)node_sequence,
+                      (double)energy);
+  len = safe_len(len, sizeof(line));
+  /* 화재는 놓치면 그걸로 끝이라 리미터를 우회한다. 홀은 상태가 다시
+   * 보고되지만 화재의 발생 순간은 다시 오지 않는다. */
+  emit_line(line, len, LORA_MSG_SENSOR_EVENT, node_sequence, true);
 }
 
 void SensorProtocol_SendFlameEnergyDebug(float raw_avg, float baseline, float energy,
