@@ -13,6 +13,8 @@ Release/
 .cubeide_ws_build/
 
 # CMSIS-DSP 중 불필요한 것들
-STM1/Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
-STM1/Drivers/CMSIS/DSP/Examples/
-STM1/Drivers/CMSIS/DSP/Projects/
+# 보드 경로를 박지 않는다. STM2 를 STM1 에서 복사해 만들었더니 DSP 트리가
+# 그대로 딸려왔는데, STM1/ 로 고정돼 있어서 610개가 통째로 추적 대상이 됐다.
+**/Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
+**/Drivers/CMSIS/DSP/Examples/
+**/Drivers/CMSIS/DSP/Projects/
