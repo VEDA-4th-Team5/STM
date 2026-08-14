@@ -254,13 +254,36 @@ int main(void)
          * "LORA OK" 는 UART 로 넘겼다는 뜻이지 전파가 나갔다는 보장은 아니다. */
         LoRa_ConfigureFull(LORA_CH_DATA_DEFAULT, LORA_PWR_10DBM, LORA_LBT_ENABLE,
                            LORA_AIR_PROJECT, LORA_UART_PROJECT, false);
+    /* 이 두 줄은 디버그 플래그와 무관하게 항상 찍는다.
+     *
+     * 설정 확인에 실패하면 전파법 인터록이 송신을 전부 막는데, 그때 수신은
+     * 계속 된다 -- 모듈이 저장된 설정으로 동작하기 때문이다. 그래서 겉보기엔
+     * "명령은 받는데 갑자기 송신만 안 되는" 상태가 되고, 로그가 없으면
+     * 원인을 짚을 수가 없다. 실제로 그 상황을 겪었다.
+     *
+     * 부팅 때 한 번 나가는 몇 줄이라 비용이 없다. */
+    printf("\r\n# LORA CFG %s (ch=%u pwr=10dBm lbt=%d air=62.5k uart=115200)\r\n",
+           (lora_st == HAL_OK) ? "OK" : "FAIL -- 송신 차단됨(인터록)",
+           (unsigned)LORA_CH_DATA_DEFAULT, LORA_LBT_ENABLE);
+    if (lora_st == HAL_OK) { LoRa_DumpRegisters(); }
+
+    /* AUX 상태. 설정이 멀쩡한데 송신만 안 될 때 남은 후보가 이것이다.
+     *
+     * AUX 가 GND 로 눌려 있으면 모듈이 영원히 "바쁨" 으로 읽혀서, 매 송신마다
+     * LoRa_WaitAuxIdle() 이 타임아웃(2초)을 다 쓰고 나간다. 로그상 송신은
+     * 시도되는데 실제로는 거의 안 나가는 것처럼 보인다.
+     *
+     * 지금 레벨이 LOW 인데 모듈이 idle 이어야 할 상황이면 배선을 의심할 것.
+     * detected=no 는 배선이 아예 안 붙었다는 뜻이고, 그 경우는 풀업 덕분에
+     * 항상 HIGH 로 읽혀 동작에는 지장이 없다. */
+    printf("# LORA AUX: level=%s  detected=%s  (PA7/D11)\r\n",
+           (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_SET)
+               ? "HIGH(idle)" : "LOW(busy)",
+           LoRa_AuxDetected() ? "yes" : "no");
+
 #if LORA_DEBUG_HEX
-    /* 브링업 진단: 설정이 안 먹으면 인터록이 송신을 전부 막으므로,
-     * 여기서 성공 여부를 못 보면 원인을 찾을 수 없다. */
-    printf("\r\n# LORA CFG %s (ch=%u pwr=10dBm lbt=on air=62.5k uart=115200)\r\n",
-           (lora_st == HAL_OK) ? "OK" : "FAIL -- 송신 차단됨",
-           (unsigned)LORA_CH_DATA_DEFAULT);
-    if (lora_st == HAL_OK) { LoRa_DumpRegisters(); LoRa_CheckNormalMode(); }
+    if (lora_st == HAL_OK) { LoRa_CheckNormalMode(); }
+#endif
     if (lora_st != HAL_OK)
     {
       /* 설정이 안 먹었으면 어디서 막혔는지 자동으로 훑는다. 라인 프로브 ->
@@ -271,9 +294,6 @@ int main(void)
       LoRa_DetectVariant();
       LoRa_Diag();
     }
-#else
-    (void)lora_st;
-#endif
   }
 #endif
   /* USER CODE END 2 */
