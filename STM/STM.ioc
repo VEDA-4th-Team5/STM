@@ -1,4 +1,4 @@
-#MicroXplorer Configuration settings - do not modify
+﻿#MicroXplorer Configuration settings - do not modify
 ADC1.Channel-0\#ChannelRegularConversion=ADC_CHANNEL_10
 ADC1.DMAContinuousRequests=ENABLE
 ADC1.ExternalTrigConv=ADC_EXTERNALTRIGCONV_T2_TRGO
@@ -207,8 +207,8 @@ ProjectManager.MainLocation=Core/Src
 ProjectManager.NoMain=false
 ProjectManager.PreviousToolchain=STM32CubeIDE
 ProjectManager.ProjectBuild=false
-ProjectManager.ProjectFileName=STM1.ioc
-ProjectManager.ProjectName=STM1
+ProjectManager.ProjectFileName=STM.ioc
+ProjectManager.ProjectName=STM
 ProjectManager.RegisterCallBack=
 ProjectManager.StackSize=0x400
 ProjectManager.TargetToolchain=STM32CubeIDE

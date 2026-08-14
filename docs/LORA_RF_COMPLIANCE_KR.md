@@ -412,7 +412,7 @@ LoRa 설정을 바꾸는 작업을 할 때는 이 제약을 먼저 확인하고,
 
 ## 관련 문서
 
-- `STM1/README.md` — LoRa 절 (배선, 프레임 포맷, duty 리미터)
+- `STM/README.md` — LoRa 절 (배선, 프레임 포맷, duty 리미터)
 - Confluence: `LoRa 배선 정본 — STM1 / Raspberry Pi (2026-08-07)`
 - Confluence: `STM1 ↔ RPi LoRa 링크 완성 기록 (2026-08-07)`
 - Confluence: `LoRa E22-900T22S(1B) 브링업 기록 (2026-08-03)` — KC 리포트 판독 경위

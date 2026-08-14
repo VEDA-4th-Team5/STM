@@ -222,7 +222,10 @@ int main(void)
    * 돌리며 "왜 새 기능이 안 보이지" 를 몇 번 반복했다. 부팅할 때마다 빌드
    * 시각과 켜져 있는 기능을 찍어두면 그 혼선이 사라진다. */
   printf("\r\n======================================================\r\n");
-  printf("# STM1  build %s %s\r\n", __DATE__, __TIME__);
+  /* 보드 이름은 하드코딩하지 않는다. STM1/STM2 펌웨어가 같은 코드라
+   * 여기가 고정이면 두 보드가 똑같은 이름으로 찍혀서, 어느 쪽 로그를 보고
+   * 있는지 헷갈린다. 콘솔이 두 개 열려 있을 때 특히 위험하다. */
+  printf("# %s  build %s %s\r\n", SENSOR_NODE_ID, __DATE__, __TIME__);
   printf("# payload v1.1 (frame ver 0x%02X) / node %s\r\n",
          (unsigned)LORA_FRAME_VERSION, SENSOR_NODE_ID);
   printf("# TX  uart=%d lora=%d   LoRa ch=%u pwr=10dBm lbt=%d\r\n",
