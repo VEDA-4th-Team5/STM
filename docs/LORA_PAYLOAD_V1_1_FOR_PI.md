@@ -2,7 +2,7 @@
 
 > 대상: Raspberry Pi 서버 / Qt 담당자
 > STM 측 구현 완료 및 실기기 검증 완료. 프레임 `version = 0x02`.
-> 관련: EVDA-46, EVDA-201 / `STM1/README.md`, `docs/LORA_RF_COMPLIANCE_KR.md`
+> 관련: EVDA-46, EVDA-201 / `STM/README.md`, `docs/LORA_RF_COMPLIANCE_KR.md`
 
 ---
 

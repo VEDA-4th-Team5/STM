@@ -31,6 +31,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "board_config.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -189,7 +190,16 @@ typedef enum {
 /* 이 보드의 주소. 부팅할 때마다 모듈에 써 넣으므로, 어떤 모듈을 꽂든
  * STM1 보드에 꽂힌 모듈은 0x0001 이 된다. 모듈을 바꿔 끼울 때마다
  * "이게 몇 번이더라" 를 따질 필요가 없어진다. */
+/* 내 주소는 board_config.h 의 BOARD_SELECT 를 따라간다. 여기를 손으로 맞추게
+ * 두면 노드 ID 는 STM2 인데 주소는 STM1 인 펌웨어를 만들 수 있고, 그러면 두
+ * 보드가 같은 주소로 송신하면서 링크가 조용히 망가진다. 한 곳에서만 정하게
+ * 묶어두면 그 조합 자체가 나올 수 없다. */
+#if   BOARD_SELECT == BOARD_STM1
 #define LORA_MY_ADDRESS    LORA_ADDR_STM1
+#elif BOARD_SELECT == BOARD_STM2
+#define LORA_MY_ADDRESS    LORA_ADDR_STM2
+#endif
+
 /* 기본 목적지. 센서 데이터는 전부 Pi 로 간다. */
 #define LORA_PEER_ADDRESS  LORA_ADDR_RPI
 
