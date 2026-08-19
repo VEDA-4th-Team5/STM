@@ -99,7 +99,7 @@ static uint8_t hall_last_reported_state[SENSOR_HALL_COUNT] = {0};
  * 시간 안에 반드시 맞아진다.
  *
  * 이게 없으면 채터링 시 duty 리미터가 프레임을 버리는데, 버려진 게 상태
- * 변화면 수신측은 다음 하트비트(30초)까지 틀린 상태를 들고 있게 된다. */
+ * 변화면 수신측은 다음 하트비트(SENSOR_HEARTBEAT_MS)까지 틀린 상태를 든다. */
 static uint32_t hall_last_sent_tick[SENSOR_HALL_COUNT] = {0};
 static uint8_t  hall_sent_once[SENSOR_HALL_COUNT] = {0};
 static uint8_t  hall_pending[SENSOR_HALL_COUNT] = {0};
@@ -217,11 +217,12 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_TIMERS */
   hallHeartbeatTimerHandle = osTimerNew(HallHeartbeatTimerCallback, osTimerPeriodic, NULL, &hallHeartbeatTimer_attributes);
-  osTimerStart(hallHeartbeatTimerHandle, 30000);
+  /* 시작은 StartDefaultTask 에서 한다. 노드별로 반 주기 어긋내야 하는데
+   * 여기는 스케줄러가 아직 안 돌아서 osDelay 를 쓸 수 없다. */
 
 #if SENSOR_HAS_FLAME
   flameHeartbeatTimerHandle = osTimerNew(FlameHeartbeatTimerCallback, osTimerPeriodic, NULL, &flameHeartbeatTimer_attributes);
-  /* 5초 주기로 돌지만 CLEARED 상태에서는 6번에 한 번(=30초)만 실제로 보낸다.
+  /* 5초 주기로 돌지만 CLEARED 상태에서는 SENSOR_HEARTBEAT_MS 마다만 보낸다.
    * DETECTED 인 동안에만 5초 간격 텔레메트리가 된다 -- 콜백 주석 참고. */
   osTimerStart(flameHeartbeatTimerHandle, SENSOR_FLAME_TELEMETRY_MS);
 #endif
@@ -273,6 +274,20 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  /* 홀 하트비트 타이머는 여기서 건다.
+   *
+   * 두 보드를 같이 켜면 하트비트가 정렬돼서 매 주기 같은 시점에 충돌한다.
+   * LoRa 는 half-duplex 라 그러면 한쪽이 계속 지는 형태가 될 수 있고,
+   * 그건 확률적 충돌보다 나쁘다 -- 특정 노드만 만성적으로 유실된다.
+   * 노드별로 반 주기 어긋내면 그 상황이 구조적으로 안 생긴다.
+   *
+   * MX_FREERTOS_Init 에서 못 하는 이유는 그 시점에 스케줄러가 아직
+   * 시작되지 않아 osDelay 가 동작하지 않기 때문이다. */
+#if SENSOR_HEARTBEAT_STAGGER_MS > 0
+  osDelay(SENSOR_HEARTBEAT_STAGGER_MS);
+#endif
+  osTimerStart(hallHeartbeatTimerHandle, SENSOR_HEARTBEAT_MS);
+
 #if SENSOR_TX_LORA
   /* LoRa 하행 펌프.
    *
@@ -523,14 +538,14 @@ static void FlameHeartbeatTimerCallback(void *argument)
    * 않는다. 연속 스트리밍은 duty 예산을 감당할 수 없다 -- 1초 간격이면
    * 분당 780ms 로 예산 960ms 의 81% 를 화재 하나가 먹는다.
    *
-   *   CLEARED (평상시) : 30초마다 한 번. 순수 liveness 신호.
+   *   CLEARED (평상시) : SENSOR_HEARTBEAT_MS 마다 한 번. 순수 liveness 신호.
    *   DETECTED (연소중) : 5초마다. 필요한 순간에만 촘촘해진다.
    *
    * 화재는 드문 사건이라 이 비대칭이 duty 에 주는 부담은 실질적으로 없고,
    * Qt 는 정작 봐야 할 때 5초 간격 곡선을 얻는다. */
   static uint32_t tick = 0;
   const uint32_t TICKS_PER_HEARTBEAT =
-      30000u / SENSOR_FLAME_TELEMETRY_MS;   /* 30초 = 6틱 */
+      SENSOR_HEARTBEAT_MS / SENSOR_FLAME_TELEMETRY_MS;  /* 10초 = 2틱 */
 
   tick++;
   if ((flame_last_verdict == 0) && (tick < TICKS_PER_HEARTBEAT))
@@ -614,7 +629,7 @@ void StartTaskHallSensor(void *argument)
      *
      * 다만 쿨다운에 걸려 대기 중인(pending) 채널이 있으면 무한정 기다리면
      * 안 된다. 채터링이 멎어 더 이상 엣지가 안 오면 그 상태 변화가 다음
-     * 하트비트(30초)까지 묻히기 때문이다. 남은 쿨다운만큼만 기다렸다가
+     * 하트비트까지 묻히기 때문이다. 남은 쿨다운만큼만 기다렸다가
      * 깨어나 밀어낸다. */
     uint32_t wait = osWaitForever;
     for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
@@ -730,14 +745,25 @@ static void HallHeartbeatTimerCallback(void *argument)
 
   for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
   {
-    /* 최근 30초 안에 이미 보낸 채널은 건너뛴다.
+    /* 최근 SENSOR_HEARTBEAT_MS 안에 이미 보낸 채널은 건너뛴다.
      *
      * 하트비트의 목적은 "이 노드가 살아 있다"를 알리는 것뿐인데, 방금
-     * 상태를 보낸 채널은 그게 이미 증명돼 있다. 무조건 4개를 보내면
-     * 채터링 중인 채널이 쿨다운 전송과 하트비트를 둘 다 내보내면서
-     * duty 최악 케이스가 925ms(예산의 96%)까지 올라간다. 건너뛰면
-     * 817ms(85%)로 떨어지고, 수신측이 받는 정보는 달라지지 않는다. */
-    if (hall_sent_once[ch] && ((now - hall_last_sent_tick[ch]) < 30000u))
+     * 상태를 보낸 채널은 그게 이미 증명돼 있다. 무조건 다 보내면 채터링
+     * 중인 채널이 쿨다운 전송과 하트비트를 둘 다 내보낸다.
+     *
+     * duty 최악 케이스 (홀 2채널 + 화재, 프레임당 약 14ms, 예산 960ms/60초):
+     *   홀 채터링      2ch x (60/5초) x 14ms = 336 ms
+     *   화재 텔레메트리 (60/5초) x 14ms      = 168 ms
+     *   하트비트 (건너뛰기 없을 때)          = 252 ms
+     *
+     *   건너뛰면  504 ms (예산의 53%)
+     *   안 건너뛰면 756 ms (예산의 79%)
+     *
+     * 수신측이 받는 정보는 어느 쪽이든 같다. 그래서 건너뛴다.
+     *
+     * ★ 이 창은 하트비트 주기와 반드시 같아야 한다. 더 길면 타이머는
+     *   도는데 매번 전부 건너뛰어서 하트비트가 사실상 멈춘다. */
+    if (hall_sent_once[ch] && ((now - hall_last_sent_tick[ch]) < SENSOR_HEARTBEAT_MS))
     {
       continue;
     }
