@@ -858,6 +858,22 @@ void StartTaskPacketTX(void *argument)
           SensorDashboard_UpdateFlame(evt.state, evt.energy);
 #else
           SensorProtocol_SendFlameStatus(evt.state, evt.energy);
+
+          /* DETECTED 만 몇 번 더 보낸다(EVDA-124). 충돌로 한 번 씹혀도
+           * 서버가 화재를 놓치지 않게 하기 위한 것이다. CLEARED 는
+           * 하트비트가 다시 알려주므로 재전송하지 않는다.
+           *
+           * 여기서 osDelay 로 이 태스크가 잠깐 멈춘다. 그 사이 홀 이벤트는
+           * 큐에 쌓이는데, 홀 쿨다운이 5초라 400ms 지연은 흡수된다.
+           * 화재가 홀보다 우선이라 이 교환은 성립한다. */
+          if (evt.state != 0)
+          {
+            for (uint8_t r = 0; r < SENSOR_FLAME_REPEAT_COUNT; r++)
+            {
+              osDelay(SENSOR_FLAME_REPEAT_GAP_MS);
+              SensorProtocol_ResendLastFlame();
+            }
+          }
 #endif
           break;
       }

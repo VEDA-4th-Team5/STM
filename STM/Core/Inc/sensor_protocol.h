@@ -116,6 +116,23 @@
 #define SENSOR_FLAME_TELEMETRY_MS    5000u
 
 /*
+ * DETECTED 엣지 재전송 (EVDA-124).
+ *
+ * 노드가 둘이 되면서 half-duplex 충돌로 프레임이 씹힐 여지가 생겼다.
+ * 추정 충돌률은 프레임당 0.5% 수준(LBT 적용 전)으로 낮지만, 하필 그 순간이
+ * 화재면 다음 하트비트까지 서버가 모른다.
+ *
+ * 하트비트를 더 줄이는 것보다 이쪽이 훨씬 싸다. 하트비트는 아무 일 없을
+ * 때도 계속 비용을 내지만, 재전송은 불이 났을 때만 낸다.
+ *   추가 비용 = 2회 x 약 14ms = 28ms, 그것도 화재 순간에만
+ *
+ * 세 번이 모두 충돌할 확률은 사실상 0 이다. CLEARED 는 재전송하지 않는다 --
+ * 그건 하트비트가 다시 알려주는 상태값이다.
+ */
+#define SENSOR_FLAME_REPEAT_COUNT     2u    /* 최초 전송에 더해 몇 번 더 */
+#define SENSOR_FLAME_REPEAT_GAP_MS  200u
+
+/*
  * 하트비트 주기(ms). "이 노드가 살아 있다"를 알리는 간격이자, 프레임이
  * 유실됐을 때 수신측이 틀린 상태를 들고 있는 최대 시간이다.
  *
@@ -172,6 +189,18 @@ void SensorProtocol_SendHallStatus(uint8_t slot_index, uint8_t occupied);
 /* verdict: 1 = DETECTED, 0 = CLEARED. energy 는 1~20Hz 대역 에너지로,
  * 이제 전선에 실려 나간다(Qt 시각화용). 판정은 여전히 STM32 가 한다. */
 void SensorProtocol_SendFlameStatus(uint8_t verdict, float energy);
+
+/*
+ * 직전 화재 라인을 **같은 seq 로 바이트 단위 동일하게** 다시 보낸다(EVDA-124).
+ *
+ * DETECTED 는 놓치면 그 순간이 다시 오지 않는다. LoRa 는 half-duplex 라
+ * 두 노드가 겹치면 프레임이 통째로 유실되는데, 송신측은 그 사실을 알 수
+ * 없다(LBT 는 포기해도 알려주지 않고, HAL_UART_Transmit 은 항상 성공을
+ * 돌려준다). 그래서 확인 대신 몇 번 더 보낸다.
+ *
+ * 같은 seq 이므로 수신측 시퀀스 가드가 중복으로 걸러낸다 - 수신측 변경이
+ * 필요 없다. */
+void SensorProtocol_ResendLastFlame(void);
 void SensorProtocol_SendFlameEnergyDebug(float raw_avg, float baseline, float energy,
                                          float delta, uint8_t raw_verdict,
                                          uint8_t votes, uint8_t verdict);
