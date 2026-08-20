@@ -385,6 +385,12 @@ void StartTaskFlameSensor(void *argument)
    * a few low windows mixed in without losing the detection. */
   #define FLAME_VOTE_WINDOW 5    /* look at the last 5 one-second windows */
   #define FLAME_VOTE_THRESHOLD 3 /* ...and require at least 3 of them over threshold */
+  /* baseline 추종 계수 (EVDA-218). 1초 창 기준 시정수 약 100초.
+   *
+   * 크게 잡으면 baseline 이 불을 따라가 검출을 놓치고, 작게 잡으면 조명
+   * 변화를 못 따라가 예전 결함이 그대로 남는다. 추종 자체가 "깨끗한 창"
+   * 에서만 돌기 때문에 이 값이 안전을 혼자 책임지지는 않는다. */
+  #define FLAME_BASELINE_TRACK_ALPHA 0.01f
 
   arm_rfft_fast_instance_f32 fft_inst;
   float32_t input_buf[FFT_SIZE];
@@ -401,7 +407,8 @@ void StartTaskFlameSensor(void *argument)
    * Everything after that then sat above threshold, pinning the verdict to
    * DETECTED forever -- and since it never changed again, no further edge
    * events were ever emitted, which looked like the sensor going dead.
-   * Discard the first few windows, then average a few more into the baseline. */
+   * Discard the first few windows, then average a few more into the baseline.
+   * 그 뒤로는 깨끗한 창에서만 천천히 따라간다(EVDA-218). */
   #define FLAME_SETTLE_WINDOWS   3  /* discarded entirely */
   #define FLAME_BASELINE_WINDOWS 3  /* averaged into the initial baseline */
 
@@ -445,10 +452,19 @@ void StartTaskFlameSensor(void *argument)
       continue; /* no verdict until we know what "ambient" looks like */
     }
 
+    /* delta 는 **위쪽 방향만** 본다.
+     *
+     * 예전에는 절댓값이었는데, DFR0076 은 불이 나면 값이 *올라가는* 센서라
+     * 내려가는 방향까지 화재로 치는 것은 근거가 없었다. 오히려 위험했다 --
+     * 센서가 빠지거나 baseline 이 밝을 때 잡히면, 어두워지는 것만으로
+     * DETECTED 가 되고 그 상태로 고정됐다.
+     *
+     * 아래로 벗어난 것은 baseline 이 틀렸다는 뜻이므로, 화재로 보는 대신
+     * 아래 추종 로직이 흡수하게 둔다. */
     float32_t delta = raw_avg - baseline_avg;
     if (delta < 0.0f)
     {
-      delta = -delta;
+      delta = 0.0f;
     }
 
     arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
@@ -473,6 +489,31 @@ void StartTaskFlameSensor(void *argument)
     vote_index = (vote_index + 1) % FLAME_VOTE_WINDOW;
 
     uint8_t debounced_verdict = (vote_count >= FLAME_VOTE_THRESHOLD) ? 1 : 0;
+
+    /* ---- baseline 추종 (EVDA-218) --------------------------------------
+     *
+     * baseline 을 부팅 때 한 번 잡고 끝내면, 주변 밝기가 그 뒤로 달라졌을 때
+     * delta 가 영구히 임계 위에 남는다. 그러면 불이 꺼져도 CLEARED 로 못
+     * 돌아오고, 상태가 안 바뀌니 엣지 이벤트도 안 나가 센서가 죽은 것처럼
+     * 보인다. 예전에 부팅 직후 값으로 baseline 을 잡았다가 같은 증상을 겪고
+     * settle 구간을 넣어 고쳤는데, 그건 부팅 순간만 다룬 것이라 부팅 이후
+     * 어긋나는 경우가 그대로 남아 있었다.
+     *
+     * ★ 이 창이 깨끗할 때(raw_verdict == 0)만 따라간다.
+     *
+     * 이 조건이 안전의 핵심이다. raw_verdict 가 0 이라는 것은 flicker 도
+     * DC 상승도 임계 아래라는 뜻이므로, 불이 조금이라도 걸리는 순간 추종이
+     * 즉시 멈춘다. 판정과 무관하게 계속 따라가게 두면 연소 중에 baseline 이
+     * 불을 쫓아 올라가 스스로 CLEARED 로 빠진다.
+     *
+     * 시정수는 약 100초(alpha = 0.01, 1초 창 기준)다. 조명 변화나 센서
+     * 드리프트는 흡수하면서, 불꽃이 이 속도보다 느리게 올라오는 일은 없다 --
+     * 실측 불꽃은 1480~4095 로 튀고 그 훨씬 전에 raw_verdict 가 1 이 되어
+     * 추종이 멈춘다. */
+    if (raw_verdict == 0)
+    {
+      baseline_avg += FLAME_BASELINE_TRACK_ALPHA * (raw_avg - baseline_avg);
+    }
 
     /* energy no longer goes on the wire (the Pi's parser has no field for
      * it), so expose it here instead for threshold retuning. Compiled out
