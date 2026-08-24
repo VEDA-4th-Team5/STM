@@ -99,7 +99,7 @@ static uint8_t hall_last_reported_state[SENSOR_HALL_COUNT] = {0};
  * 시간 안에 반드시 맞아진다.
  *
  * 이게 없으면 채터링 시 duty 리미터가 프레임을 버리는데, 버려진 게 상태
- * 변화면 수신측은 다음 하트비트(30초)까지 틀린 상태를 들고 있게 된다. */
+ * 변화면 수신측은 다음 하트비트(SENSOR_HEARTBEAT_MS)까지 틀린 상태를 든다. */
 static uint32_t hall_last_sent_tick[SENSOR_HALL_COUNT] = {0};
 static uint8_t  hall_sent_once[SENSOR_HALL_COUNT] = {0};
 static uint8_t  hall_pending[SENSOR_HALL_COUNT] = {0};
@@ -217,11 +217,12 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_TIMERS */
   hallHeartbeatTimerHandle = osTimerNew(HallHeartbeatTimerCallback, osTimerPeriodic, NULL, &hallHeartbeatTimer_attributes);
-  osTimerStart(hallHeartbeatTimerHandle, 30000);
+  /* 시작은 StartDefaultTask 에서 한다. 노드별로 반 주기 어긋내야 하는데
+   * 여기는 스케줄러가 아직 안 돌아서 osDelay 를 쓸 수 없다. */
 
 #if SENSOR_HAS_FLAME
   flameHeartbeatTimerHandle = osTimerNew(FlameHeartbeatTimerCallback, osTimerPeriodic, NULL, &flameHeartbeatTimer_attributes);
-  /* 5초 주기로 돌지만 CLEARED 상태에서는 6번에 한 번(=30초)만 실제로 보낸다.
+  /* 5초 주기로 돌지만 CLEARED 상태에서는 SENSOR_HEARTBEAT_MS 마다만 보낸다.
    * DETECTED 인 동안에만 5초 간격 텔레메트리가 된다 -- 콜백 주석 참고. */
   osTimerStart(flameHeartbeatTimerHandle, SENSOR_FLAME_TELEMETRY_MS);
 #endif
@@ -273,6 +274,20 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  /* 홀 하트비트 타이머는 여기서 건다.
+   *
+   * 두 보드를 같이 켜면 하트비트가 정렬돼서 매 주기 같은 시점에 충돌한다.
+   * LoRa 는 half-duplex 라 그러면 한쪽이 계속 지는 형태가 될 수 있고,
+   * 그건 확률적 충돌보다 나쁘다 -- 특정 노드만 만성적으로 유실된다.
+   * 노드별로 반 주기 어긋내면 그 상황이 구조적으로 안 생긴다.
+   *
+   * MX_FREERTOS_Init 에서 못 하는 이유는 그 시점에 스케줄러가 아직
+   * 시작되지 않아 osDelay 가 동작하지 않기 때문이다. */
+#if SENSOR_HEARTBEAT_STAGGER_MS > 0
+  osDelay(SENSOR_HEARTBEAT_STAGGER_MS);
+#endif
+  osTimerStart(hallHeartbeatTimerHandle, SENSOR_HEARTBEAT_MS);
+
 #if SENSOR_TX_LORA
   /* LoRa 하행 펌프.
    *
@@ -370,6 +385,12 @@ void StartTaskFlameSensor(void *argument)
    * a few low windows mixed in without losing the detection. */
   #define FLAME_VOTE_WINDOW 5    /* look at the last 5 one-second windows */
   #define FLAME_VOTE_THRESHOLD 3 /* ...and require at least 3 of them over threshold */
+  /* baseline 추종 계수 (EVDA-218). 1초 창 기준 시정수 약 100초.
+   *
+   * 크게 잡으면 baseline 이 불을 따라가 검출을 놓치고, 작게 잡으면 조명
+   * 변화를 못 따라가 예전 결함이 그대로 남는다. 추종 자체가 "깨끗한 창"
+   * 에서만 돌기 때문에 이 값이 안전을 혼자 책임지지는 않는다. */
+  #define FLAME_BASELINE_TRACK_ALPHA 0.01f
 
   arm_rfft_fast_instance_f32 fft_inst;
   float32_t input_buf[FFT_SIZE];
@@ -386,7 +407,8 @@ void StartTaskFlameSensor(void *argument)
    * Everything after that then sat above threshold, pinning the verdict to
    * DETECTED forever -- and since it never changed again, no further edge
    * events were ever emitted, which looked like the sensor going dead.
-   * Discard the first few windows, then average a few more into the baseline. */
+   * Discard the first few windows, then average a few more into the baseline.
+   * 그 뒤로는 깨끗한 창에서만 천천히 따라간다(EVDA-218). */
   #define FLAME_SETTLE_WINDOWS   3  /* discarded entirely */
   #define FLAME_BASELINE_WINDOWS 3  /* averaged into the initial baseline */
 
@@ -430,10 +452,19 @@ void StartTaskFlameSensor(void *argument)
       continue; /* no verdict until we know what "ambient" looks like */
     }
 
+    /* delta 는 **위쪽 방향만** 본다.
+     *
+     * 예전에는 절댓값이었는데, DFR0076 은 불이 나면 값이 *올라가는* 센서라
+     * 내려가는 방향까지 화재로 치는 것은 근거가 없었다. 오히려 위험했다 --
+     * 센서가 빠지거나 baseline 이 밝을 때 잡히면, 어두워지는 것만으로
+     * DETECTED 가 되고 그 상태로 고정됐다.
+     *
+     * 아래로 벗어난 것은 baseline 이 틀렸다는 뜻이므로, 화재로 보는 대신
+     * 아래 추종 로직이 흡수하게 둔다. */
     float32_t delta = raw_avg - baseline_avg;
     if (delta < 0.0f)
     {
-      delta = -delta;
+      delta = 0.0f;
     }
 
     arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
@@ -458,6 +489,31 @@ void StartTaskFlameSensor(void *argument)
     vote_index = (vote_index + 1) % FLAME_VOTE_WINDOW;
 
     uint8_t debounced_verdict = (vote_count >= FLAME_VOTE_THRESHOLD) ? 1 : 0;
+
+    /* ---- baseline 추종 (EVDA-218) --------------------------------------
+     *
+     * baseline 을 부팅 때 한 번 잡고 끝내면, 주변 밝기가 그 뒤로 달라졌을 때
+     * delta 가 영구히 임계 위에 남는다. 그러면 불이 꺼져도 CLEARED 로 못
+     * 돌아오고, 상태가 안 바뀌니 엣지 이벤트도 안 나가 센서가 죽은 것처럼
+     * 보인다. 예전에 부팅 직후 값으로 baseline 을 잡았다가 같은 증상을 겪고
+     * settle 구간을 넣어 고쳤는데, 그건 부팅 순간만 다룬 것이라 부팅 이후
+     * 어긋나는 경우가 그대로 남아 있었다.
+     *
+     * ★ 이 창이 깨끗할 때(raw_verdict == 0)만 따라간다.
+     *
+     * 이 조건이 안전의 핵심이다. raw_verdict 가 0 이라는 것은 flicker 도
+     * DC 상승도 임계 아래라는 뜻이므로, 불이 조금이라도 걸리는 순간 추종이
+     * 즉시 멈춘다. 판정과 무관하게 계속 따라가게 두면 연소 중에 baseline 이
+     * 불을 쫓아 올라가 스스로 CLEARED 로 빠진다.
+     *
+     * 시정수는 약 100초(alpha = 0.01, 1초 창 기준)다. 조명 변화나 센서
+     * 드리프트는 흡수하면서, 불꽃이 이 속도보다 느리게 올라오는 일은 없다 --
+     * 실측 불꽃은 1480~4095 로 튀고 그 훨씬 전에 raw_verdict 가 1 이 되어
+     * 추종이 멈춘다. */
+    if (raw_verdict == 0)
+    {
+      baseline_avg += FLAME_BASELINE_TRACK_ALPHA * (raw_avg - baseline_avg);
+    }
 
     /* energy no longer goes on the wire (the Pi's parser has no field for
      * it), so expose it here instead for threshold retuning. Compiled out
@@ -523,14 +579,14 @@ static void FlameHeartbeatTimerCallback(void *argument)
    * 않는다. 연속 스트리밍은 duty 예산을 감당할 수 없다 -- 1초 간격이면
    * 분당 780ms 로 예산 960ms 의 81% 를 화재 하나가 먹는다.
    *
-   *   CLEARED (평상시) : 30초마다 한 번. 순수 liveness 신호.
+   *   CLEARED (평상시) : SENSOR_HEARTBEAT_MS 마다 한 번. 순수 liveness 신호.
    *   DETECTED (연소중) : 5초마다. 필요한 순간에만 촘촘해진다.
    *
    * 화재는 드문 사건이라 이 비대칭이 duty 에 주는 부담은 실질적으로 없고,
    * Qt 는 정작 봐야 할 때 5초 간격 곡선을 얻는다. */
   static uint32_t tick = 0;
   const uint32_t TICKS_PER_HEARTBEAT =
-      30000u / SENSOR_FLAME_TELEMETRY_MS;   /* 30초 = 6틱 */
+      SENSOR_HEARTBEAT_MS / SENSOR_FLAME_TELEMETRY_MS;  /* 10초 = 2틱 */
 
   tick++;
   if ((flame_last_verdict == 0) && (tick < TICKS_PER_HEARTBEAT))
@@ -614,7 +670,7 @@ void StartTaskHallSensor(void *argument)
      *
      * 다만 쿨다운에 걸려 대기 중인(pending) 채널이 있으면 무한정 기다리면
      * 안 된다. 채터링이 멎어 더 이상 엣지가 안 오면 그 상태 변화가 다음
-     * 하트비트(30초)까지 묻히기 때문이다. 남은 쿨다운만큼만 기다렸다가
+     * 하트비트까지 묻히기 때문이다. 남은 쿨다운만큼만 기다렸다가
      * 깨어나 밀어낸다. */
     uint32_t wait = osWaitForever;
     for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
@@ -730,14 +786,25 @@ static void HallHeartbeatTimerCallback(void *argument)
 
   for (uint8_t ch = 0; ch < SENSOR_HALL_COUNT; ch++)
   {
-    /* 최근 30초 안에 이미 보낸 채널은 건너뛴다.
+    /* 최근 SENSOR_HEARTBEAT_MS 안에 이미 보낸 채널은 건너뛴다.
      *
      * 하트비트의 목적은 "이 노드가 살아 있다"를 알리는 것뿐인데, 방금
-     * 상태를 보낸 채널은 그게 이미 증명돼 있다. 무조건 4개를 보내면
-     * 채터링 중인 채널이 쿨다운 전송과 하트비트를 둘 다 내보내면서
-     * duty 최악 케이스가 925ms(예산의 96%)까지 올라간다. 건너뛰면
-     * 817ms(85%)로 떨어지고, 수신측이 받는 정보는 달라지지 않는다. */
-    if (hall_sent_once[ch] && ((now - hall_last_sent_tick[ch]) < 30000u))
+     * 상태를 보낸 채널은 그게 이미 증명돼 있다. 무조건 다 보내면 채터링
+     * 중인 채널이 쿨다운 전송과 하트비트를 둘 다 내보낸다.
+     *
+     * duty 최악 케이스 (홀 2채널 + 화재, 프레임당 약 14ms, 예산 960ms/60초):
+     *   홀 채터링      2ch x (60/5초) x 14ms = 336 ms
+     *   화재 텔레메트리 (60/5초) x 14ms      = 168 ms
+     *   하트비트 (건너뛰기 없을 때)          = 252 ms
+     *
+     *   건너뛰면  504 ms (예산의 53%)
+     *   안 건너뛰면 756 ms (예산의 79%)
+     *
+     * 수신측이 받는 정보는 어느 쪽이든 같다. 그래서 건너뛴다.
+     *
+     * ★ 이 창은 하트비트 주기와 반드시 같아야 한다. 더 길면 타이머는
+     *   도는데 매번 전부 건너뛰어서 하트비트가 사실상 멈춘다. */
+    if (hall_sent_once[ch] && ((now - hall_last_sent_tick[ch]) < SENSOR_HEARTBEAT_MS))
     {
       continue;
     }
@@ -791,6 +858,22 @@ void StartTaskPacketTX(void *argument)
           SensorDashboard_UpdateFlame(evt.state, evt.energy);
 #else
           SensorProtocol_SendFlameStatus(evt.state, evt.energy);
+
+          /* DETECTED 만 몇 번 더 보낸다(EVDA-124). 충돌로 한 번 씹혀도
+           * 서버가 화재를 놓치지 않게 하기 위한 것이다. CLEARED 는
+           * 하트비트가 다시 알려주므로 재전송하지 않는다.
+           *
+           * 여기서 osDelay 로 이 태스크가 잠깐 멈춘다. 그 사이 홀 이벤트는
+           * 큐에 쌓이는데, 홀 쿨다운이 5초라 400ms 지연은 흡수된다.
+           * 화재가 홀보다 우선이라 이 교환은 성립한다. */
+          if (evt.state != 0)
+          {
+            for (uint8_t r = 0; r < SENSOR_FLAME_REPEAT_COUNT; r++)
+            {
+              osDelay(SENSOR_FLAME_REPEAT_GAP_MS);
+              SensorProtocol_ResendLastFlame();
+            }
+          }
 #endif
           break;
       }

@@ -21,6 +21,13 @@
  * 재부팅하면 0 으로 돌아간다 -- 수신측은 이를 노드 재시작으로 해석해야 한다. */
 static uint32_t node_sequence = 0;
 
+/* 마지막으로 내보낸 화재 라인. 재전송에서 **같은 seq 로 똑같이** 다시
+ * 보내기 위해 통째로 들고 있는다. 다시 만들면 node_sequence 가 올라가
+ * 수신측이 별개 이벤트로 받아들인다(EVDA-124). */
+static char     flame_last_line[64];
+static int      flame_last_len = 0;
+static uint32_t flame_last_seq = 0;
+
 /**
  * 완성된 한 줄을 선택된 경로로 내보낸다.
  * @param seq       Pi 문서 권장대로 payload 안의 seq 와 같은 값을 프레임
@@ -95,9 +102,34 @@ void SensorProtocol_SendFlameStatus(uint8_t verdict, float energy)
                       (unsigned long)node_sequence,
                       (double)energy);
   len = safe_len(len, sizeof(line));
+  len = safe_len(len, sizeof(line));
+
+  /* 재전송용으로 보관한다(EVDA-124). 다시 만들어 보내면 node_sequence 가
+   * 올라가서 수신측이 별개 이벤트로 받아들이므로, 라인을 통째로 들고 있다가
+   * 같은 seq 로 똑같이 내보내야 한다. */
+  if ((len > 0) && (len <= (int)sizeof(flame_last_line)))
+  {
+    memcpy(flame_last_line, line, (size_t)len);
+    flame_last_len = len;
+    flame_last_seq = node_sequence;
+  }
+  else
+  {
+    flame_last_len = 0;
+  }
+
   /* 화재는 놓치면 그걸로 끝이라 리미터를 우회한다. 홀은 상태가 다시
    * 보고되지만 화재의 발생 순간은 다시 오지 않는다. */
   emit_line(line, len, LORA_MSG_SENSOR_EVENT, node_sequence, true);
+}
+
+void SensorProtocol_ResendLastFlame(void)
+{
+  /* 바이트 단위로 동일하게, 같은 seq 로 다시 보낸다. 수신측 시퀀스 가드가
+   * 중복으로 보고 버리므로 이벤트가 두 번 기록되지 않는다. 아직 화재
+   * 라인을 만든 적이 없으면 flame_last_len 이 0 이라 emit_line 이 무시한다. */
+  emit_line(flame_last_line, flame_last_len, LORA_MSG_SENSOR_EVENT,
+            flame_last_seq, true);
 }
 
 void SensorProtocol_SendFlameEnergyDebug(float raw_avg, float baseline, float energy,
