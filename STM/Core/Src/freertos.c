@@ -384,12 +384,45 @@ void StartTaskFlameSensor(void *argument)
    * windows and flaps ALERT/CLEAR. A sliding K-of-N majority vote tolerates
    * a few low windows mixed in without losing the detection. */
   #define FLAME_VOTE_WINDOW 5    /* look at the last 5 one-second windows */
-  #define FLAME_VOTE_THRESHOLD 3 /* ...and require at least 3 of them over threshold */
+  /* 진입/해제 문턱을 나눈다 -- 히스테리시스.
+   *
+   * 예전에는 양쪽 다 3 이었는데, 그러면 신호가 임계 근처에 걸쳤을 때
+   * vote_count 가 2<->3 을 오가며 매 초 판정이 뒤집히고 DETECTED/CLEARED
+   * 가 반복해서 나간다. 화재는 엣지 전송이라 그 진동이 그대로 전파를
+   * 먹고(EVDA-124 로 DETECTED 는 3프레임씩 나간다) duty 예산까지 흔든다.
+   *
+   * 들어갈 때 4/5, 나올 때 1/5 이하를 요구하면 경계선 채터링이 사라진다.
+   * 진짜 불은 실측상 delta 1400 이상이라 4/5 를 못 채울 일이 없고,
+   * 꺼진 뒤에는 5창이 전부 조용해지므로 해제도 늦지 않다. */
+  #define FLAME_VOTE_ENTER 4     /* CLEARED -> DETECTED : 5창 중 4 이상 */
+  #define FLAME_VOTE_EXIT  2     /* DETECTED -> CLEARED : 5창 중 1 이하 */
   /* baseline 추종 계수 (EVDA-218). 1초 창 기준 시정수 약 100초.
    *
    * 크게 잡으면 baseline 이 불을 따라가 검출을 놓치고, 작게 잡으면 조명
    * 변화를 못 따라가 예전 결함이 그대로 남는다. 추종 자체가 "깨끗한 창"
    * 에서만 돌기 때문에 이 값이 안전을 혼자 책임지지는 않는다. */
+  /* 고착 탈출 (stuck DETECTED).
+   *
+   * 깨끗한 창에서만 추종하는 규칙에는 빠져나올 수 없는 고리가 있다.
+   * 주변 IR 이 서서히 올라 delta 가 임계를 넘으면 raw_verdict 가 1 이 되고,
+   * 그러면 추종이 멈추므로 delta 는 계속 임계 위에 남는다. baseline 이
+   * 자기가 갇힌 상태를 스스로 풀 수 없어 영구 DETECTED 가 된다. 오래
+   * 켜둘수록(조명 변화 / 햇빛 / 센서 자기발열) 걸릴 확률이 올라간다.
+   *
+   * 탈출구는 실측 크기 차이에서 나온다:
+   *     드리프트로 걸린 delta   300~400
+   *     실제 불꽃 delta       1427~4042   (raw 1480~4095)
+   *
+   * 그래서 DETECTED 가 비정상적으로 오래 지속되면 아주 느린 추종을 재개한다.
+   * 시정수 1000초로 갉으면 드리프트분(300~400)은 몇 분 안에 흡수돼 스스로
+   * 풀리지만, 진짜 불(1400 이상)은 한참을 버틴다. 화재가 10분 넘게 이어지는
+   * 상황이면 이미 사람이 알고 있다고 보는 것이 안전 판단으로도 타당하다.
+   *
+   * baseline 을 통째로 재수립(baseline_ready = 0)하는 방법도 있으나, 재수립
+   * 구간 동안 판정이 비고 그 사이 불이 타고 있으면 불 포함된 값이 새 baseline
+   * 이 되어 스스로 CLEARED 로 빠진다. 그래서 쓰지 않는다. */
+  #define FLAME_STUCK_WINDOWS      600     /* 1초 창 기준 10분 */
+  #define FLAME_STUCK_TRACK_ALPHA  0.001f  /* 시정수 약 1000초 */
   #define FLAME_BASELINE_TRACK_ALPHA 0.01f
 
   arm_rfft_fast_instance_f32 fft_inst;
@@ -400,6 +433,10 @@ void StartTaskFlameSensor(void *argument)
   uint8_t vote_history[FLAME_VOTE_WINDOW] = {0}; /* raw_verdict of the last N windows */
   uint8_t vote_index = 0;
   uint8_t vote_count = 0; /* running count of 1s currently in vote_history */
+
+  /* raw_verdict 가 1 로 연속한 창 수. FLAME_STUCK_WINDOWS 를 넘으면
+   * 느린 추종을 켜서 고착에서 빠져나온다. 위 정의 참고. */
+  uint32_t detect_run = 0;
 
   /* Boot settling. Taking the very first window as the ambient baseline was
    * unreliable: right after power-up the sensor output (and the ADC/DMA
@@ -488,7 +525,12 @@ void StartTaskFlameSensor(void *argument)
     vote_count += raw_verdict;
     vote_index = (vote_index + 1) % FLAME_VOTE_WINDOW;
 
-    uint8_t debounced_verdict = (vote_count >= FLAME_VOTE_THRESHOLD) ? 1 : 0;
+    /* 히스테리시스: 지금 어느 상태냐에 따라 문턱이 다르다. 위 정의 참고.
+     * 부팅 직후에는 flame_last_verdict 가 0 이므로 진입 문턱(4/5)을 쓴다 --
+     * 조용한 방에서 켰을 때 곧바로 DETECTED 로 새는 일이 없다. */
+    uint8_t debounced_verdict = (flame_last_verdict == 0)
+                              ? ((vote_count >= FLAME_VOTE_ENTER) ? 1 : 0)
+                              : ((vote_count >= FLAME_VOTE_EXIT)  ? 1 : 0);
 
     /* ---- baseline 추종 (EVDA-218) --------------------------------------
      *
@@ -512,7 +554,17 @@ void StartTaskFlameSensor(void *argument)
      * 추종이 멈춘다. */
     if (raw_verdict == 0)
     {
+      detect_run = 0;
       baseline_avg += FLAME_BASELINE_TRACK_ALPHA * (raw_avg - baseline_avg);
+    }
+    else if (++detect_run > FLAME_STUCK_WINDOWS)
+    {
+      /* 10분 넘게 임계 위에 머물러 있다. 불이 그렇게 오래 같은 세기로
+       * 타고 있을 수도 있지만, baseline 이 틀렸을 가능성도 같은 무게로
+       * 인정해야 한다. 아주 느리게 따라가면 둘 중 어느 쪽이었는지가
+       * 저절로 판가름난다 -- 드리프트는 흡수되어 CLEARED 로 풀리고,
+       * 진짜 불은 delta 가 커서 계속 DETECTED 로 남는다. */
+      baseline_avg += FLAME_STUCK_TRACK_ALPHA * (raw_avg - baseline_avg);
     }
 
     /* energy no longer goes on the wire (the Pi's parser has no field for
