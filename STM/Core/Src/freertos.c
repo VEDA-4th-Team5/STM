@@ -424,6 +424,21 @@ void StartTaskFlameSensor(void *argument)
     /* Blocks here until main.c's ADC callback signals one full window is ready. */
     osSemaphoreAcquire(adcBufReadySemHandle, osWaitForever);
 
+    /* ===== 임시 계측 (측정 끝나면 제거) ===================== */
+    static uint8_t  m_init = 0;
+    static uint32_t m_n = 0, m_fft_sum = 0, m_win_sum = 0;
+    static uint32_t m_fft_max = 0, m_win_max = 0;
+    if (!m_init)
+    {
+      CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+      DWT->CYCCNT = 0;
+      DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+      m_init = 1;
+    }
+    uint32_t m_t_win = DWT->CYCCNT;
+    uint32_t m_c_fft = 0;
+    /* ====================================================== */
+
     /* adc_buf is 12-bit unsigned (0~4095); recenter around the 2048 midpoint
      * and scale to roughly -1..1 for the FFT. Also accumulate the raw sum
      * for the DC-level check below (same samples, no extra ADC work). */
@@ -467,8 +482,10 @@ void StartTaskFlameSensor(void *argument)
       delta = 0.0f;
     }
 
+    uint32_t m_t_fft = DWT->CYCCNT;
     arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
     arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
+    m_c_fft = DWT->CYCCNT - m_t_fft;
 
     /* Sum magnitude across bins 1~20 (i.e. 1~20Hz) into one "energy" number
      * instead of sending all 20 bins over the wire. */
@@ -518,6 +535,30 @@ void StartTaskFlameSensor(void *argument)
     /* energy no longer goes on the wire (the Pi's parser has no field for
      * it), so expose it here instead for threshold retuning. Compiled out
      * unless FLAME_DEBUG_ENERGY is on. */
+    /* ===== 임시 계측 출력 (측정 끝나면 제거) =============== */
+    {
+      uint32_t m_c_win = DWT->CYCCNT - m_t_win;
+      m_n++;
+      m_fft_sum += m_c_fft;
+      m_win_sum += m_c_win;
+      if (m_c_fft > m_fft_max) m_fft_max = m_c_fft;
+      if (m_c_win > m_win_max) m_win_max = m_c_win;
+      if (m_n >= 10u)
+      {
+        printf("# PERF fft avg=%lu max=%lu cyc (%lu us)"
+               " | win avg=%lu max=%lu cyc (%lu us)"
+               " | stack_free=%lu w | heap_free=%lu B\r\n",
+               (unsigned long)(m_fft_sum / m_n), (unsigned long)m_fft_max,
+               (unsigned long)(m_fft_sum / m_n / 84u),
+               (unsigned long)(m_win_sum / m_n), (unsigned long)m_win_max,
+               (unsigned long)(m_win_sum / m_n / 84u),
+               (unsigned long)uxTaskGetStackHighWaterMark(NULL),
+               (unsigned long)xPortGetFreeHeapSize());
+        m_n = 0; m_fft_sum = 0; m_win_sum = 0; m_fft_max = 0; m_win_max = 0;
+      }
+    }
+    /* ====================================================== */
+
     SensorProtocol_SendFlameEnergyDebug(raw_avg, baseline_avg, energy, delta,
                                         raw_verdict, vote_count, debounced_verdict);
 
