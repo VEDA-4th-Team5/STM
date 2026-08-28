@@ -67,8 +67,18 @@
 
 /* 1 = also print the per-window flame energy/delta as a comment line, so the
  * thresholds can be retuned without a debugger. Not Pi-safe: keep at 0 for
- * integration. */
-#define FLAME_DEBUG_ENERGY 0
+ * integration.
+ *
+ * 지금은 1 이다 -- FLAME_RAW_THRESHOLD(2500) 를 시험 환경 실측으로 확정하기
+ * 위해 켜뒀다. 출력 형식은 baseline 을 없애면서 이렇게 바뀌었다:
+ *
+ *   # raw=352.1 base=2500.0 e=0.6210 d=-2147.9 hit=0 votes=0 -> CLEARED
+ *          ^raw DC   ^임계값        ^에너지  ^임계 대비 여유
+ *
+ * base 는 이제 고정 임계값이고, d 는 raw - 임계값이라 음수면 안전한 것이다.
+ * !! 임계 확정하면 다시 0 으로 되돌릴 것. 매 초 UART 로 한 줄씩 나가므로
+ *    Pi 연동 상태로 두면 파서에 잡음이 섞인다. */
+#define FLAME_DEBUG_ENERGY 1
 
 /* ==========================================================================
  * 보드 구성
