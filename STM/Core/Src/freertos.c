@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include "arm_math.h"
+#include "arm_const_structs.h"
 #include "sensor_queue.h"
 #include "sensor_protocol.h"
 #include "alert_command.h"
@@ -417,7 +418,36 @@ void StartTaskFlameSensor(void *argument)
   uint8_t baseline_ready = 0;
   float32_t baseline_avg = 0.0f;
 
-  arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE);
+  /* arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE) 를 쓰지 않고 인스턴스를
+   * 직접 채운다. 동작은 완전히 같고, 플래시를 78.6KB 아낀다.
+   *
+   * 그 함수는 Sint->fftLen(= FFT_SIZE/2) 으로 switch 를 돌면서 지원하는
+   * 모든 길이의 테이블을 참조한다. 분기 하나만 실행되지만 참조는 전부
+   * 남으므로 -ffunction-sections/--gc-sections 로도 못 버린다. 64포인트만
+   * 쓰는데 4096포인트까지의 twiddle 이 통째로 링크됐다:
+   *
+   *     FFT 테이블 총합   78,936 B   (텍스트 132,520 B 의 59.6%)
+   *     실제 필요분          608 B
+   *
+   * 아래는 그 switch 의 case 32U 가 채우는 값과 필드 단위로 동일하다
+   * (Sint->fftLen = FFT_SIZE/2 = 32 이므로 그 분기가 선택된다):
+   *
+   *     Sint.fftLen        32
+   *     Sint.pTwiddle      twiddleCoef_32
+   *     Sint.pBitRevTable  armBitRevIndexTable32
+   *     Sint.bitRevLength  ARMBITREVINDEXTABLE_32_TABLE_LENGTH
+   *     fftLenRFFT         64
+   *     pTwiddleRFFT       twiddleCoef_rfft_64
+   *
+   * arm_cfft_sR_f32_len32 (arm_const_structs.c) 가 앞의 네 필드를 그대로
+   * 들고 있어서 대입 한 번이면 된다.
+   *
+   * !! FFT_SIZE 를 바꾸면 아래 두 상수도 같이 바꿔야 한다 --
+   *    arm_cfft_sR_f32_len<FFT_SIZE/2> 와 twiddleCoef_rfft_<FFT_SIZE>. */
+  fft_inst.Sint = arm_cfft_sR_f32_len32;
+  fft_inst.Sint.fftLen = FFT_SIZE / 2;
+  fft_inst.fftLenRFFT = FFT_SIZE;
+  fft_inst.pTwiddleRFFT = (float32_t *)twiddleCoef_rfft_64;
 
   for (;;)
   {
