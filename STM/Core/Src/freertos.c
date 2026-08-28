@@ -357,27 +357,28 @@ void StartTaskFlameSensor(void *argument)
   /* 64 samples @ 64Hz = 1 second window -> 1Hz per FFT bin, matching the
    * 1~20Hz flame-flicker band we care about. */
   #define FFT_SIZE 64
-  /* STM32 doesn't own the final fire-alarm decision -- the Pi does -- but
-   * this local verdict still needs to be a meaningful ALERT/CLEAR over
-   * UART, not just raw telemetry. Both thresholds below are tuned against
-   * real DFR0076 hardware: ignition/hand-movement/fluorescent-light/monitor
-   * tests on 2026-07-23 (see docs/), not arbitrary placeholders. */
-  /* Ambient energy measured 0.15~0.61; flame transition spikes hit 10~103.
-   * 5.0 is ~8x over ambient. */
-  #define FLAME_ENERGY_THRESHOLD 5.0f
-  /* FFT flicker energy is the primary signal and usually holds up during a
-   * burn, but once the sensor saturates the window goes flat and the AC
-   * content vanishes -- energy reads exactly 0.0000, observed for up to 9
-   * consecutive windows. Raw DC level is the opposite: slower, but it tracks
-   * continuous IR intensity right through saturation. OR them so either one
-   * alone can carry a window.
+  /* 화재 판정: raw DC 절대 임계 하나.
    *
-   * Measured 2026-07-30 at the current sensor gain/distance:
-   *   ambient  raw 46~69     -> delta 0~12      (drift only, no flame)
-   *   flame    raw 1480~4095 -> delta 1427~4042 (pins at ADC full scale)
-   * 300 sits ~13x above the worst ambient drift and ~4.7x below the weakest
-   * flame window. (Was 40, which left only ~3x headroom over ambient.) */
-  #define FLAME_DELTA_THRESHOLD 300.0f
+   * 적응형 baseline 방식을 버렸다. 두 번 실패했다:
+   *   1) 부팅 때 한 번 잡고 고정 -- 주변광이 그 뒤로 달라지면 영구 오검출
+   *   2) 깨끗한 창에서만 추종  -- 임계를 한번 넘으면 추종이 멈춰 스스로
+   *      빠져나올 수 없다. 실측에서 부팅 약 60초 뒤 DETECTED 로 잠겼고
+   *      돌아오지 않았다(2026-08-28 로그).
+   *
+   * 적응형이 필요했던 이유는 ambient(46~69)와 불꽃(1480~4095)의 거리가
+   * 가깝다고 봤기 때문인데, 실제 시험 조건은 라이터를 센서 코앞에 대는
+   * 것이라 ADC 가 포화(4095)한다. 20배 이상 벌어지므로 고정 임계로 충분하다.
+   *
+   *   ambient (실측 2026-07-30)   46 ~ 69
+   *   시험 방 ambient (추정)      350 내외
+   *   라이터 근접                 4095 (포화)
+   *
+   * 2500 은 방 주변광의 약 7배 위, 포화값의 0.6배 아래다.
+   *
+   * !! 이 값은 "라이터 근접" 조건에 맞춘 것이다. 거리를 두거나 약한 불꽃을
+   *    잡아야 하면 실측 후 다시 정해야 한다. 문서상 가장 약한 불꽃 창이
+   *    1480 이므로 그 경우 임계는 800 근처가 된다. */
+  #define FLAME_RAW_THRESHOLD 2500.0f
   /* Real flame flicker is chaotic, not a clean steady oscillation -- a small
    * lighter flame can have individual 1-second windows that happen to land
    * calm and read near baseline even while genuinely burning. A strict
@@ -397,35 +398,6 @@ void StartTaskFlameSensor(void *argument)
    * 꺼진 뒤에는 5창이 전부 조용해지므로 해제도 늦지 않다. */
   #define FLAME_VOTE_ENTER 4     /* CLEARED -> DETECTED : 5창 중 4 이상 */
   #define FLAME_VOTE_EXIT  2     /* DETECTED -> CLEARED : 5창 중 1 이하 */
-  /* baseline 추종 계수 (EVDA-218). 1초 창 기준 시정수 약 100초.
-   *
-   * 크게 잡으면 baseline 이 불을 따라가 검출을 놓치고, 작게 잡으면 조명
-   * 변화를 못 따라가 예전 결함이 그대로 남는다. 추종 자체가 "깨끗한 창"
-   * 에서만 돌기 때문에 이 값이 안전을 혼자 책임지지는 않는다. */
-  /* 고착 탈출 (stuck DETECTED).
-   *
-   * 깨끗한 창에서만 추종하는 규칙에는 빠져나올 수 없는 고리가 있다.
-   * 주변 IR 이 서서히 올라 delta 가 임계를 넘으면 raw_verdict 가 1 이 되고,
-   * 그러면 추종이 멈추므로 delta 는 계속 임계 위에 남는다. baseline 이
-   * 자기가 갇힌 상태를 스스로 풀 수 없어 영구 DETECTED 가 된다. 오래
-   * 켜둘수록(조명 변화 / 햇빛 / 센서 자기발열) 걸릴 확률이 올라간다.
-   *
-   * 탈출구는 실측 크기 차이에서 나온다:
-   *     드리프트로 걸린 delta   300~400
-   *     실제 불꽃 delta       1427~4042   (raw 1480~4095)
-   *
-   * 그래서 DETECTED 가 비정상적으로 오래 지속되면 아주 느린 추종을 재개한다.
-   * 시정수 1000초로 갉으면 드리프트분(300~400)은 몇 분 안에 흡수돼 스스로
-   * 풀리지만, 진짜 불(1400 이상)은 한참을 버틴다. 화재가 10분 넘게 이어지는
-   * 상황이면 이미 사람이 알고 있다고 보는 것이 안전 판단으로도 타당하다.
-   *
-   * baseline 을 통째로 재수립(baseline_ready = 0)하는 방법도 있으나, 재수립
-   * 구간 동안 판정이 비고 그 사이 불이 타고 있으면 불 포함된 값이 새 baseline
-   * 이 되어 스스로 CLEARED 로 빠진다. 그래서 쓰지 않는다. */
-  #define FLAME_STUCK_WINDOWS      600     /* 1초 창 기준 10분 */
-  #define FLAME_STUCK_TRACK_ALPHA  0.001f  /* 시정수 약 1000초 */
-  #define FLAME_BASELINE_TRACK_ALPHA 0.01f
-
   arm_rfft_fast_instance_f32 fft_inst;
   float32_t input_buf[FFT_SIZE];
   float32_t output_buf[FFT_SIZE];
@@ -435,25 +407,12 @@ void StartTaskFlameSensor(void *argument)
   uint8_t vote_index = 0;
   uint8_t vote_count = 0; /* running count of 1s currently in vote_history */
 
-  /* raw_verdict 가 1 로 연속한 창 수. FLAME_STUCK_WINDOWS 를 넘으면
-   * 느린 추종을 켜서 고착에서 빠져나온다. 위 정의 참고. */
-  uint32_t detect_run = 0;
-
-  /* Boot settling. Taking the very first window as the ambient baseline was
-   * unreliable: right after power-up the sensor output (and the ADC/DMA
-   * pipeline) hasn't settled, so the baseline could latch a bogus low value.
-   * Everything after that then sat above threshold, pinning the verdict to
-   * DETECTED forever -- and since it never changed again, no further edge
-   * events were ever emitted, which looked like the sensor going dead.
-   * Discard the first few windows, then average a few more into the baseline.
-   * 그 뒤로는 깨끗한 창에서만 천천히 따라간다(EVDA-218). */
-  #define FLAME_SETTLE_WINDOWS   3  /* discarded entirely */
-  #define FLAME_BASELINE_WINDOWS 3  /* averaged into the initial baseline */
+  /* 부팅 직후 몇 창은 버린다. 전원 인가 직후에는 센서 출력과 ADC/DMA 가
+   * 아직 안정되지 않아 엉뚱한 값이 나올 수 있다. 고정 임계라 낮게 읽히는
+   * 건 CLEARED 라 무해하지만, 높게 읽히면 그대로 오검출이 된다. */
+  #define FLAME_SETTLE_WINDOWS 3
 
   uint32_t window_count = 0;
-  float32_t baseline_accum = 0.0f;
-  uint8_t baseline_ready = 0;
-  float32_t baseline_avg = 0.0f;
 
   /* arm_rfft_fast_init_f32(&fft_inst, FFT_SIZE) 를 쓰지 않고 인스턴스를
    * 직접 채운다. 동작은 완전히 같고, 플래시를 78.6KB 아낀다.
@@ -508,46 +467,24 @@ void StartTaskFlameSensor(void *argument)
       continue; /* still settling -- this reading means nothing yet */
     }
 
-    if (!baseline_ready)
-    {
-      baseline_accum += raw_avg;
-      if (window_count >= FLAME_SETTLE_WINDOWS + FLAME_BASELINE_WINDOWS)
-      {
-        baseline_avg = baseline_accum / (float32_t)FLAME_BASELINE_WINDOWS;
-        baseline_ready = 1;
-      }
-      continue; /* no verdict until we know what "ambient" looks like */
-    }
-
-    /* delta 는 **위쪽 방향만** 본다.
-     *
-     * 예전에는 절댓값이었는데, DFR0076 은 불이 나면 값이 *올라가는* 센서라
-     * 내려가는 방향까지 화재로 치는 것은 근거가 없었다. 오히려 위험했다 --
-     * 센서가 빠지거나 baseline 이 밝을 때 잡히면, 어두워지는 것만으로
-     * DETECTED 가 되고 그 상태로 고정됐다.
-     *
-     * 아래로 벗어난 것은 baseline 이 틀렸다는 뜻이므로, 화재로 보는 대신
-     * 아래 추종 로직이 흡수하게 둔다. */
-    float32_t delta = raw_avg - baseline_avg;
-    if (delta < 0.0f)
-    {
-      delta = 0.0f;
-    }
-
     arm_rfft_fast_f32(&fft_inst, input_buf, output_buf, 0);
     arm_cmplx_mag_f32(output_buf, mag_buf, FFT_SIZE / 2);
 
     /* Sum magnitude across bins 1~20 (i.e. 1~20Hz) into one "energy" number
-     * instead of sending all 20 bins over the wire. */
+     * instead of sending all 20 bins over the wire.
+     *
+     * energy 는 v1.1 부터 FIRE 프레임에 실려 Qt 대시보드가 그린다. 판정에는
+     * 쓰지 않는다 -- 센서가 포화되면 창이 평평해져 AC 성분이 사라지고
+     * energy 가 0 이 되므로 단독 신호로 못 쓴다(실측에서 9창 연속 0.0000).
+     * 시각화용 텔레메트리로만 남긴다. */
     float32_t energy = 0.0f;
     for (int bin = 1; bin <= 20; bin++)
     {
       energy += mag_buf[bin];
     }
 
-    /* Hybrid trigger: flicker spike (ignition/movement) OR sustained DC
-     * level shift (steady burn) either one counts as a hit this window. */
-    uint8_t raw_verdict = (energy >= FLAME_ENERGY_THRESHOLD || delta >= FLAME_DELTA_THRESHOLD) ? 1 : 0;
+    /* 판정은 DC 절대 임계 하나로 한다. 위 FLAME_RAW_THRESHOLD 주석 참고. */
+    uint8_t raw_verdict = (raw_avg >= FLAME_RAW_THRESHOLD) ? 1 : 0;
 
     /* Slide the vote window: drop the oldest window's vote, add this one's. */
     vote_count -= vote_history[vote_index];
@@ -562,45 +499,11 @@ void StartTaskFlameSensor(void *argument)
                               ? ((vote_count >= FLAME_VOTE_ENTER) ? 1 : 0)
                               : ((vote_count >= FLAME_VOTE_EXIT)  ? 1 : 0);
 
-    /* ---- baseline 추종 (EVDA-218) --------------------------------------
-     *
-     * baseline 을 부팅 때 한 번 잡고 끝내면, 주변 밝기가 그 뒤로 달라졌을 때
-     * delta 가 영구히 임계 위에 남는다. 그러면 불이 꺼져도 CLEARED 로 못
-     * 돌아오고, 상태가 안 바뀌니 엣지 이벤트도 안 나가 센서가 죽은 것처럼
-     * 보인다. 예전에 부팅 직후 값으로 baseline 을 잡았다가 같은 증상을 겪고
-     * settle 구간을 넣어 고쳤는데, 그건 부팅 순간만 다룬 것이라 부팅 이후
-     * 어긋나는 경우가 그대로 남아 있었다.
-     *
-     * ★ 이 창이 깨끗할 때(raw_verdict == 0)만 따라간다.
-     *
-     * 이 조건이 안전의 핵심이다. raw_verdict 가 0 이라는 것은 flicker 도
-     * DC 상승도 임계 아래라는 뜻이므로, 불이 조금이라도 걸리는 순간 추종이
-     * 즉시 멈춘다. 판정과 무관하게 계속 따라가게 두면 연소 중에 baseline 이
-     * 불을 쫓아 올라가 스스로 CLEARED 로 빠진다.
-     *
-     * 시정수는 약 100초(alpha = 0.01, 1초 창 기준)다. 조명 변화나 센서
-     * 드리프트는 흡수하면서, 불꽃이 이 속도보다 느리게 올라오는 일은 없다 --
-     * 실측 불꽃은 1480~4095 로 튀고 그 훨씬 전에 raw_verdict 가 1 이 되어
-     * 추종이 멈춘다. */
-    if (raw_verdict == 0)
-    {
-      detect_run = 0;
-      baseline_avg += FLAME_BASELINE_TRACK_ALPHA * (raw_avg - baseline_avg);
-    }
-    else if (++detect_run > FLAME_STUCK_WINDOWS)
-    {
-      /* 10분 넘게 임계 위에 머물러 있다. 불이 그렇게 오래 같은 세기로
-       * 타고 있을 수도 있지만, baseline 이 틀렸을 가능성도 같은 무게로
-       * 인정해야 한다. 아주 느리게 따라가면 둘 중 어느 쪽이었는지가
-       * 저절로 판가름난다 -- 드리프트는 흡수되어 CLEARED 로 풀리고,
-       * 진짜 불은 delta 가 커서 계속 DETECTED 로 남는다. */
-      baseline_avg += FLAME_STUCK_TRACK_ALPHA * (raw_avg - baseline_avg);
-    }
-
-    /* energy no longer goes on the wire (the Pi's parser has no field for
-     * it), so expose it here instead for threshold retuning. Compiled out
-     * unless FLAME_DEBUG_ENERGY is on. */
-    SensorProtocol_SendFlameEnergyDebug(raw_avg, baseline_avg, energy, delta,
+    /* 판정 근거를 그대로 노출한다. FLAME_DEBUG_ENERGY 가 0 이면 컴파일에서
+     * 통째로 빠진다. baseline 을 없앴으므로 base/delta 자리에는 임계값과
+     * 임계 대비 여유를 대신 넣어 로그 형식을 유지한다. */
+    SensorProtocol_SendFlameEnergyDebug(raw_avg, FLAME_RAW_THRESHOLD, energy,
+                                        raw_avg - FLAME_RAW_THRESHOLD,
                                         raw_verdict, vote_count, debounced_verdict);
 
     /* Emit only on a confirmed state change: the Pi expects fire as an edge
